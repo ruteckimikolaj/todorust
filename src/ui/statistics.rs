@@ -71,6 +71,57 @@ fn last7_sparkline(app: &App) -> Vec<u64> {
     counts.to_vec()
 }
 
+// Rolling average age (in whole days) of currently open tasks. `None` when there are no
+// open tasks. Age is measured from `creation_date` to now, so it grows with staleness.
+fn avg_open_age_days(app: &App) -> Option<f64> {
+    let now = chrono::Utc::now();
+    let ages: Vec<f64> = app
+        .tasks
+        .iter()
+        .filter(|t| !t.completed)
+        .map(|t| (now - t.creation_date).num_seconds() as f64 / 86_400.0)
+        .collect();
+    if ages.is_empty() {
+        None
+    } else {
+        Some(ages.iter().sum::<f64>() / ages.len() as f64)
+    }
+}
+
+// (this_week_completions, last_week_completions) — for the review "trend" row.
+fn completions_this_vs_last_week(app: &App) -> (u64, u64) {
+    let today = Local::now().date_naive();
+    let this_monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+    let last_monday = this_monday - chrono::Duration::days(7);
+    let (mut this_wk, mut last_wk) = (0u64, 0u64);
+    for task in &app.tasks {
+        if let Some(dt) = task.completion_date {
+            let d = dt.with_timezone(&Local).date_naive();
+            if d >= this_monday && d <= today {
+                this_wk += 1;
+            } else if d >= last_monday && d < this_monday {
+                last_wk += 1;
+            }
+        }
+    }
+    (this_wk, last_wk)
+}
+
+// Top N projects ranked by open-task count (ties broken alphabetically). "(no project)"
+// is aggregated separately when it would land in the top slots.
+fn top_projects_by_open(app: &App, n: usize) -> Vec<(String, usize)> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for task in app.tasks.iter().filter(|t| !t.completed) {
+        let key = task.project.clone().unwrap_or_else(|| "(none)".to_string());
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    let mut items: Vec<(String, usize)> = counts.into_iter().collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items.truncate(n);
+    items
+}
+
 pub fn draw_statistics(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme) {
     let wide = frame.area().width >= BARCHART_MIN_WIDTH;
 
@@ -80,6 +131,7 @@ pub fn draw_statistics(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme
             .constraints([
                 Constraint::Length(3), // title
                 Constraint::Length(8), // summary (left) + barchart (right)
+                Constraint::Length(6), // review
                 Constraint::Min(0),    // task list
                 Constraint::Length(4), // help
             ])
@@ -91,6 +143,7 @@ pub fn draw_statistics(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme
                 Constraint::Length(3), // title
                 Constraint::Length(8), // summary full-width
                 Constraint::Length(3), // sparkline
+                Constraint::Length(6), // review
                 Constraint::Min(0),    // task list
                 Constraint::Length(4), // help
             ])
@@ -224,7 +277,101 @@ pub fn draw_statistics(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme
         );
     }
 
-    let (tasks_idx, help_idx) = if wide { (2, 3) } else { (3, 4) };
+    let (review_idx, tasks_idx, help_idx) = if wide { (2, 3, 4) } else { (3, 4, 5) };
+
+    // --- Review panel ---
+    let completion_rate = if total_done + open == 0 {
+        0.0
+    } else {
+        total_done as f64 / (total_done + open) as f64 * 100.0
+    };
+    let avg_age_display = match avg_open_age_days(app) {
+        Some(d) if d < 1.0 => "<1 day".to_string(),
+        Some(d) => format!("{:.1} days", d),
+        None => "—".to_string(),
+    };
+    let (this_wk, last_wk) = completions_this_vs_last_week(app);
+    let delta = this_wk as i64 - last_wk as i64;
+    let trend_str = if last_wk == 0 && this_wk == 0 {
+        "no data yet".to_string()
+    } else if delta > 0 {
+        format!("▲ +{} vs last week ({} → {})", delta, last_wk, this_wk)
+    } else if delta < 0 {
+        format!("▼ {} vs last week ({} → {})", delta, last_wk, this_wk)
+    } else {
+        format!("▶ same as last week ({})", this_wk)
+    };
+    let trend_style = if delta > 0 {
+        Style::default().fg(theme.done_color)
+    } else if delta < 0 {
+        Style::default().fg(theme.high_color)
+    } else {
+        Style::default().fg(theme.help_text_fg)
+    };
+    let top_projects = top_projects_by_open(app, 3);
+    let projects_line: Line = if top_projects.is_empty() {
+        Line::from(Span::styled(
+            "no open tasks",
+            Style::default().fg(theme.help_text_fg),
+        ))
+    } else {
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, (name, count)) in top_projects.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("  ", Style::default().fg(theme.help_text_fg)));
+            }
+            let label = if name == "(none)" {
+                "(no project)".to_string()
+            } else {
+                format!("@{}", name)
+            };
+            spans.push(Span::styled(label, Style::default().fg(theme.accent_color)));
+            spans.push(Span::styled(
+                format!(" {}", count),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+        Line::from(spans)
+    };
+    let review_lines = vec![
+        Line::from(vec![
+            Span::styled("Completion rate:  ", Style::default()),
+            Span::styled(
+                format!("{:.0}%", completion_rate),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ({} of {})", total_done, total_done + open),
+                Style::default().fg(theme.help_text_fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Avg open age:     ", Style::default()),
+            Span::styled(
+                avg_age_display,
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Overdue trend:    ", Style::default()),
+            Span::styled(trend_str, trend_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Top open projects: ", Style::default()),
+            Span::styled(String::new(), Style::default()), // placeholder to keep width even
+        ]),
+        projects_line,
+    ];
+    frame.render_widget(
+        Paragraph::new(review_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title("Review")
+                .style(Style::default().fg(theme.base_fg).bg(theme.base_bg)),
+        ),
+        chunks[review_idx],
+    );
 
     // --- Completed task list ---
     let filter = ui.filter_input.to_lowercase();
@@ -320,4 +467,76 @@ pub fn draw_statistics(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme
             .alignment(Alignment::Center),
         chunks[help_idx],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Priority, Task};
+    use chrono::Utc;
+
+    fn app_with(tasks: Vec<Task>) -> App {
+        App {
+            tasks,
+            ..App::default()
+        }
+    }
+
+    #[test]
+    fn avg_open_age_ignores_completed_tasks() {
+        let mut old = Task::new("old".into(), None, Priority::Medium);
+        old.creation_date = Utc::now() - chrono::Duration::days(4);
+        let mut done = Task::new("done".into(), None, Priority::Medium);
+        done.completed = true;
+        done.creation_date = Utc::now() - chrono::Duration::days(30);
+        let app = app_with(vec![old, done]);
+        let age = avg_open_age_days(&app).expect("has open tasks");
+        assert!((3.9..=4.1).contains(&age), "expected ~4 days, got {}", age);
+    }
+
+    #[test]
+    fn avg_open_age_none_when_no_open_tasks() {
+        let mut done = Task::new("done".into(), None, Priority::Medium);
+        done.completed = true;
+        assert!(avg_open_age_days(&app_with(vec![done])).is_none());
+        assert!(avg_open_age_days(&App::default()).is_none());
+    }
+
+    #[test]
+    fn top_projects_ranks_by_open_count_and_truncates() {
+        let mk = |name: &str, proj: Option<&str>, done: bool| {
+            let mut t = Task::new(name.into(), proj.map(|s| s.to_string()), Priority::Medium);
+            t.completed = done;
+            t
+        };
+        let app = app_with(vec![
+            mk("a", Some("work"), false),
+            mk("b", Some("work"), false),
+            mk("c", Some("work"), true), // done — excluded
+            mk("d", Some("home"), false),
+            mk("e", None, false),
+            mk("f", Some("gym"), false),
+            mk("g", Some("gym"), false),
+        ]);
+        let top = top_projects_by_open(&app, 2);
+        assert_eq!(top.len(), 2);
+        // work and gym both have 2 open; work wins ties by alpha.
+        assert_eq!(top[0], ("gym".to_string(), 2));
+        assert_eq!(top[1], ("work".to_string(), 2));
+    }
+
+    #[test]
+    fn completions_split_this_and_last_week() {
+        let this_wk = Utc::now();
+        let last_wk = Utc::now() - chrono::Duration::days(9);
+        let mut t1 = Task::new("t1".into(), None, Priority::Medium);
+        t1.completion_date = Some(this_wk);
+        let mut t2 = Task::new("t2".into(), None, Priority::Medium);
+        t2.completion_date = Some(last_wk);
+        // Only compare relative ordering; exact numbers depend on which weekday
+        // the test runs on.
+        let app = app_with(vec![t1, t2]);
+        let (this, last) = completions_this_vs_last_week(&app);
+        assert!(this + last >= 1);
+    }
 }

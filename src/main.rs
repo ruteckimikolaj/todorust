@@ -142,6 +142,7 @@ fn handle_key_event(key: KeyEvent, app: &mut App, ui: &mut UiState) {
         InputMode::EditingNotes => handle_editing_notes_input(key, app, ui),
         InputMode::EditingSubtask => handle_editing_subtask_input(key, app, ui),
         InputMode::EditingSheet => handle_editing_sheet_input(key, app, ui),
+        InputMode::Rescheduling => handle_rescheduling_input(key, app, ui),
         InputMode::Normal => {
             if key.code == KeyCode::Char('o')
                 && key.modifiers == KeyModifiers::NONE
@@ -231,6 +232,13 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             KeyCode::Char('1') => app.set_active_priority(Priority::Low),
             KeyCode::Char('2') => app.set_active_priority(Priority::Medium),
             KeyCode::Char('3') => app.set_active_priority(Priority::High),
+            // Reschedule presets: today / tomorrow / next week / prompt.
+            KeyCode::Char('t') => ui.reschedule_today(app),
+            KeyCode::Char('T') if key.modifiers == KeyModifiers::SHIFT => {
+                ui.reschedule_tomorrow(app);
+            }
+            KeyCode::Char('w') => ui.reschedule_next_week(app),
+            KeyCode::Char('r') => ui.start_reschedule(app),
             KeyCode::Char('s') | KeyCode::Char('g') => app.cycle_grouping_mode(),
             KeyCode::Char('/') => ui.input_mode = InputMode::Filtering,
             KeyCode::Down | KeyCode::Char('j') => ui.next_active_task(app),
@@ -396,6 +404,22 @@ fn handle_filtering_input(key: KeyEvent, ui: &mut UiState) {
             ui.filter_input.clear();
         }
         KeyCode::Enter => ui.input_mode = InputMode::Normal,
+        _ => {}
+    }
+}
+
+fn handle_rescheduling_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
+    match key.code {
+        KeyCode::Enter => ui.submit_reschedule(app),
+        KeyCode::Esc => ui.cancel_reschedule(),
+        KeyCode::Char(c) => {
+            ui.reschedule_error = false;
+            ui.reschedule_input.push(c);
+        }
+        KeyCode::Backspace => {
+            ui.reschedule_error = false;
+            ui.reschedule_input.pop();
+        }
         _ => {}
     }
 }

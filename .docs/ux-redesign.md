@@ -179,8 +179,16 @@ DB reads the legacy key for lossless upgrades. Touched: `src/app/mod.rs` (groupi
 `src/ui/task_list.rs` (headers + strip), `src/main.rs` (routing + `g` key), `src/db.rs`
 (migration), `src/ui/dashboard.rs` (removed).
 
-**Phase 4 — Quick-add parsing + reschedule presets (§4.1, §4.2).** Natural-language capture and
-`t`/`T`/`w`/`r`. Touch: `src/app/ui_state.rs` (parser), `main`.
+**Phase 4 — Quick-add parsing + reschedule presets (§4.1, §4.2). ✅ DONE.** New-task input parses
+`@project`, `!priority` (`1`/`l`/`low` … `3`/`h`/`high`), and `^date` tokens via
+`parse_quick_add`; the input block's title turns into a live parse preview so users see how
+their capture line is interpreted. Reschedule presets `t` (today), `T` (tomorrow), `w` (next
+week) act on the highlighted task; `r` opens a one-line prompt that accepts the same
+shortcut vocabulary (`today`, `tomorrow`, `mon..sun`, `nw`/`next-week`, `YYYY-MM-DD`,
+`YYYY-MM-DD HH:MM`; empty = clear). Rescheduling preserves the task's original time-of-day
+when it wasn't a placeholder. Touched: `src/app/ui_state.rs` (parsers +
+reschedule helpers), `src/app/mod.rs` (`InputMode::Rescheduling`, `App::set_active_due`),
+`src/main.rs` (`t`/`T`/`w`/`r` routing), `src/ui/task_list.rs` (preview + prompt).
 
 **Phase 5 — Recurring tasks + subtasks (§4.3, §4.5).** Data-model + generation logic; subtasks
 per `.docs/task.md`.

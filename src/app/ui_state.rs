@@ -1,4 +1,7 @@
-use chrono::{Local, NaiveDateTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
+    Weekday,
+};
 use ratatui_textarea::TextArea;
 
 use super::{App, InputMode, Priority, SubTask, Task, View};
@@ -52,6 +55,171 @@ pub fn parse_due(input: &str) -> Result<Option<chrono::DateTime<Utc>>, ()> {
             None => Err(()),
         },
         Err(_) => Err(()),
+    }
+}
+
+/// Result of one-line natural-language capture parsing. All fields are
+/// optional except `name`; unrecognised tokens stay in the name so the user
+/// isn't surprised by silently-dropped text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedQuickAdd {
+    pub name: String,
+    pub project: Option<String>,
+    pub priority: Option<Priority>,
+    pub due: Option<DateTime<Utc>>,
+}
+
+fn parse_priority_token(body: &str) -> Option<Priority> {
+    match body.to_ascii_lowercase().as_str() {
+        "1" | "l" | "low" => Some(Priority::Low),
+        "2" | "m" | "med" | "medium" => Some(Priority::Medium),
+        "3" | "h" | "high" => Some(Priority::High),
+        _ => None,
+    }
+}
+
+/// Map a shortcut string (case-insensitive) to a concrete due date. Recognised
+/// forms: `today` / `tod`, `tomorrow` / `tmrw`, weekday names (`mon`..`sun`,
+/// long or short), `next-week` / `next_week` / `nextweek` / `nw`, and any
+/// `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` literal.
+///
+/// Bare dates use a sensible default time: 23:59 local for *today* (so the
+/// task doesn't immediately go overdue), 09:00 local for future dates.
+pub fn parse_date_shortcut(input: &str) -> Option<DateTime<Utc>> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Explicit datetime always wins.
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, DUE_FORMAT) {
+        return Local
+            .from_local_datetime(&naive)
+            .single()
+            .map(|d| d.with_timezone(&Utc));
+    }
+    // Bare YYYY-MM-DD → 09:00 that morning.
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return with_default_time(date);
+    }
+
+    let today = Local::now().date_naive();
+    let target: Option<NaiveDate> = match s.to_ascii_lowercase().as_str() {
+        "today" | "tod" | "t" => Some(today),
+        "tomorrow" | "tmrw" | "tom" => Some(today + Duration::days(1)),
+        "next-week" | "next_week" | "nextweek" | "nw" | "w" => Some(today + Duration::days(7)),
+        other => weekday_from_str(other).map(|wd| next_weekday_on_or_after(today, wd)),
+    };
+    target.and_then(with_default_time)
+}
+
+fn weekday_from_str(s: &str) -> Option<Weekday> {
+    match s {
+        "mon" | "monday" => Some(Weekday::Mon),
+        "tue" | "tues" | "tuesday" => Some(Weekday::Tue),
+        "wed" | "weds" | "wednesday" => Some(Weekday::Wed),
+        "thu" | "thur" | "thurs" | "thursday" => Some(Weekday::Thu),
+        "fri" | "friday" => Some(Weekday::Fri),
+        "sat" | "saturday" => Some(Weekday::Sat),
+        "sun" | "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+/// Smallest date `>= today` whose weekday is `wd`. Today counts, so `mon` on
+/// Monday returns today.
+fn next_weekday_on_or_after(today: NaiveDate, wd: Weekday) -> NaiveDate {
+    let today_wd = today.weekday().num_days_from_monday() as i64;
+    let target_wd = wd.num_days_from_monday() as i64;
+    let delta = (target_wd - today_wd).rem_euclid(7);
+    today + Duration::days(delta)
+}
+
+/// Attach the default time (23:59 today, 09:00 otherwise) to a naive date and
+/// convert to UTC via the local timezone.
+fn with_default_time(date: NaiveDate) -> Option<DateTime<Utc>> {
+    let today = Local::now().date_naive();
+    let time = if date == today {
+        NaiveTime::from_hms_opt(23, 59, 0)?
+    } else {
+        NaiveTime::from_hms_opt(9, 0, 0)?
+    };
+    let naive = NaiveDateTime::new(date, time);
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+/// Reschedule a `previous` due date onto a `new_date` (local), preserving the
+/// task's original time-of-day if it had one that isn't the placeholder 09:00
+/// or 23:59. Falls back to the default time for that date.
+pub fn reschedule_to(
+    previous: Option<DateTime<Utc>>,
+    new_date: NaiveDate,
+) -> Option<DateTime<Utc>> {
+    let default = with_default_time(new_date)?;
+    let Some(prev) = previous else {
+        return Some(default);
+    };
+    let prev_local = prev.with_timezone(&Local);
+    let prev_time = prev_local.time();
+    let default_local = default.with_timezone(&Local).time();
+    if prev_time == NaiveTime::from_hms_opt(9, 0, 0)?
+        || prev_time == NaiveTime::from_hms_opt(23, 59, 0)?
+        || prev_time == default_local
+    {
+        return Some(default);
+    }
+    let naive = NaiveDateTime::new(new_date, prev_time);
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+/// Whitespace-tokenise `input`, pulling out `@project`, `!priority`, and
+/// `^date` tokens. Anything unrecognised stays in the name; a later token of
+/// the same kind overrides earlier ones so users can retype.
+pub fn parse_quick_add(input: &str) -> ParsedQuickAdd {
+    let mut project: Option<String> = None;
+    let mut priority: Option<Priority> = None;
+    let mut due: Option<DateTime<Utc>> = None;
+    let mut kept: Vec<&str> = Vec::new();
+
+    for token in input.split_whitespace() {
+        match token.chars().next() {
+            Some('@') if token.len() > 1 => {
+                let body = &token[1..];
+                let end = body
+                    .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                    .unwrap_or(body.len());
+                if end > 0 {
+                    project = Some(body[..end].to_string());
+                    continue;
+                }
+            }
+            Some('!') if token.len() > 1 => {
+                if let Some(p) = parse_priority_token(&token[1..]) {
+                    priority = Some(p);
+                    continue;
+                }
+            }
+            Some('^') if token.len() > 1 => {
+                if let Some(d) = parse_date_shortcut(&token[1..]) {
+                    due = Some(d);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        kept.push(token);
+    }
+
+    ParsedQuickAdd {
+        name: kept.join(" ").trim().to_string(),
+        project,
+        priority,
+        due,
     }
 }
 
@@ -123,6 +291,10 @@ pub struct UiState {
     pub confirm_delete: bool,
     /// The open edit sheet, if any (`InputMode::EditingSheet`).
     pub edit_sheet: Option<EditSheet>,
+    /// Buffer for the `r` reschedule prompt (`InputMode::Rescheduling`).
+    pub reschedule_input: String,
+    /// True after a failed parse in the reschedule prompt; the UI paints red.
+    pub reschedule_error: bool,
 }
 
 impl Default for UiState {
@@ -144,6 +316,8 @@ impl Default for UiState {
             show_help: false,
             confirm_delete: false,
             edit_sheet: None,
+            reschedule_input: String::new(),
+            reschedule_error: false,
         }
     }
 }
@@ -521,6 +695,78 @@ impl UiState {
         self.input_mode = InputMode::Normal;
     }
 
+    // --- Reschedule prompt (`r`) & one-key presets (`t`, `T`, `w`) ---
+
+    /// Open the reschedule prompt for the active task. Returns silently if no
+    /// task is selected or it is already completed.
+    pub fn start_reschedule(&mut self, app: &App) {
+        if let Some(idx) = app.active_task_index {
+            if app.tasks.get(idx).is_some_and(|t| !t.completed) {
+                self.reschedule_input.clear();
+                self.reschedule_error = false;
+                self.input_mode = InputMode::Rescheduling;
+            }
+        }
+    }
+
+    /// Attempt to parse the reschedule buffer. Empty input clears the due
+    /// date; a shortcut we can't parse flags `reschedule_error` and leaves the
+    /// prompt open.
+    pub fn submit_reschedule(&mut self, app: &mut App) {
+        let trimmed = self.reschedule_input.trim();
+        if trimmed.is_empty() {
+            app.set_active_due(None);
+            self.reschedule_input.clear();
+            self.reschedule_error = false;
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+        let idx = app.active_task_index;
+        let previous = idx.and_then(|i| app.tasks.get(i)).and_then(|t| t.due_date);
+        match parse_date_shortcut(trimmed) {
+            Some(new_due) => {
+                let final_due = reschedule_to(previous, new_due.with_timezone(&Local).date_naive())
+                    .unwrap_or(new_due);
+                app.set_active_due(Some(final_due));
+                self.reschedule_input.clear();
+                self.reschedule_error = false;
+                self.input_mode = InputMode::Normal;
+            }
+            None => self.reschedule_error = true,
+        }
+    }
+
+    pub fn cancel_reschedule(&mut self) {
+        self.reschedule_input.clear();
+        self.reschedule_error = false;
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Move the active task's due date to `target_date` local, keeping the
+    /// existing time-of-day when the task already had a real due time set.
+    pub fn reschedule_active(&mut self, app: &mut App, target_date: NaiveDate) {
+        let idx = match app.active_task_index {
+            Some(i) => i,
+            None => return,
+        };
+        let previous = app.tasks.get(idx).and_then(|t| t.due_date);
+        if let Some(new_due) = reschedule_to(previous, target_date) {
+            app.set_active_due(Some(new_due));
+        }
+    }
+
+    pub fn reschedule_today(&mut self, app: &mut App) {
+        self.reschedule_active(app, Local::now().date_naive());
+    }
+
+    pub fn reschedule_tomorrow(&mut self, app: &mut App) {
+        self.reschedule_active(app, Local::now().date_naive() + Duration::days(1));
+    }
+
+    pub fn reschedule_next_week(&mut self, app: &mut App) {
+        self.reschedule_active(app, Local::now().date_naive() + Duration::days(7));
+    }
+
     pub fn submit_task(&mut self, app: &mut App) {
         if let Some(idx) = self.editing_task_index.take() {
             if !self.current_input.is_empty() {
@@ -534,13 +780,17 @@ impl UiState {
             self.input_mode = InputMode::Normal;
         } else {
             if !self.current_input.is_empty() {
-                let (name, project) = parse_project(&self.current_input);
-                let priority = app.settings.default_priority;
-                app.tasks.push(Task::new(name, project, priority));
-                self.current_input.clear();
-                if app.active_task_index.is_none() {
-                    app.active_task_index = Some(app.tasks.len() - 1);
+                let parsed = parse_quick_add(&self.current_input);
+                if !parsed.name.is_empty() {
+                    let priority = parsed.priority.unwrap_or(app.settings.default_priority);
+                    let mut task = Task::new(parsed.name, parsed.project, priority);
+                    task.due_date = parsed.due;
+                    app.tasks.push(task);
+                    if app.active_task_index.is_none() {
+                        app.active_task_index = Some(app.tasks.len() - 1);
+                    }
                 }
+                self.current_input.clear();
             }
             self.input_mode = InputMode::Normal;
         }
@@ -661,5 +911,197 @@ mod tests {
         ui.toggle_selected_subtask(&mut app);
         assert!(!app.tasks[0].subtasks[0].done);
         assert!(app.tasks[0].subtasks[0].completion_date.is_none());
+    }
+
+    // --- Phase 4: quick-add parsing + reschedule presets ---
+
+    #[test]
+    fn quick_add_extracts_project_priority_and_due() {
+        let parsed = parse_quick_add("Draft Q3 report @work !3 ^2026-08-01");
+        assert_eq!(parsed.name, "Draft Q3 report");
+        assert_eq!(parsed.project.as_deref(), Some("work"));
+        assert_eq!(parsed.priority, Some(Priority::High));
+        assert!(parsed.due.is_some());
+    }
+
+    #[test]
+    fn quick_add_tokens_can_appear_anywhere() {
+        let parsed = parse_quick_add("!2 buy @home milk");
+        assert_eq!(parsed.name, "buy milk");
+        assert_eq!(parsed.project.as_deref(), Some("home"));
+        assert_eq!(parsed.priority, Some(Priority::Medium));
+        assert!(parsed.due.is_none());
+    }
+
+    #[test]
+    fn quick_add_later_token_overrides_earlier() {
+        let parsed = parse_quick_add("thing !1 more !3");
+        assert_eq!(parsed.name, "thing more");
+        assert_eq!(parsed.priority, Some(Priority::High));
+    }
+
+    #[test]
+    fn quick_add_ignores_bare_bang_and_at() {
+        // `!` / `@` with no body are just punctuation, not tokens.
+        let parsed = parse_quick_add("call @ 5pm !");
+        assert_eq!(parsed.name, "call @ 5pm !");
+        assert!(parsed.project.is_none());
+        assert!(parsed.priority.is_none());
+    }
+
+    #[test]
+    fn quick_add_unknown_tokens_stay_in_name() {
+        // `!bogus` isn't a priority, `^blah` isn't a date — keep them visible.
+        let parsed = parse_quick_add("do stuff !bogus ^blah");
+        assert_eq!(parsed.name, "do stuff !bogus ^blah");
+        assert!(parsed.priority.is_none());
+        assert!(parsed.due.is_none());
+    }
+
+    #[test]
+    fn date_shortcut_parses_named_dates() {
+        assert!(parse_date_shortcut("today").is_some());
+        assert!(parse_date_shortcut("tomorrow").is_some());
+        assert!(parse_date_shortcut("mon").is_some());
+        assert!(parse_date_shortcut("MONDAY").is_some());
+        assert!(parse_date_shortcut("next-week").is_some());
+        assert!(parse_date_shortcut("nw").is_some());
+        assert!(parse_date_shortcut("2026-12-25").is_some());
+        assert!(parse_date_shortcut("2026-12-25 08:30").is_some());
+        assert!(parse_date_shortcut("garbage").is_none());
+        assert!(parse_date_shortcut("").is_none());
+    }
+
+    #[test]
+    fn date_shortcut_today_is_end_of_day() {
+        let today = Local::now().date_naive();
+        let d = parse_date_shortcut("today").unwrap().with_timezone(&Local);
+        assert_eq!(d.date_naive(), today);
+        assert_eq!(d.time(), NaiveTime::from_hms_opt(23, 59, 0).unwrap());
+    }
+
+    #[test]
+    fn date_shortcut_tomorrow_is_9am() {
+        let tomorrow = Local::now().date_naive() + Duration::days(1);
+        let d = parse_date_shortcut("tomorrow")
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(d.date_naive(), tomorrow);
+        assert_eq!(d.time(), NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn weekday_shortcut_returns_today_when_matching_current_day() {
+        let today = Local::now().date_naive();
+        let name = match today.weekday() {
+            chrono::Weekday::Mon => "mon",
+            chrono::Weekday::Tue => "tue",
+            chrono::Weekday::Wed => "wed",
+            chrono::Weekday::Thu => "thu",
+            chrono::Weekday::Fri => "fri",
+            chrono::Weekday::Sat => "sat",
+            chrono::Weekday::Sun => "sun",
+        };
+        let d = parse_date_shortcut(name).unwrap().with_timezone(&Local);
+        assert_eq!(d.date_naive(), today);
+    }
+
+    #[test]
+    fn reschedule_preserves_custom_time_of_day() {
+        // Task had a due time of 14:30 last week; moving it to today at date-level
+        // should keep 14:30 rather than snap to a default.
+        let last_week = Local::now().date_naive() - Duration::days(7);
+        let naive = NaiveDateTime::new(last_week, NaiveTime::from_hms_opt(14, 30, 0).unwrap());
+        let previous = Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let today = Local::now().date_naive();
+        let out = reschedule_to(Some(previous), today)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(out.date_naive(), today);
+        assert_eq!(out.time(), NaiveTime::from_hms_opt(14, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn reschedule_uses_default_when_previous_had_default_time() {
+        // Task previously set via `^today` (23:59). Rescheduling to tomorrow
+        // should snap to 09:00, not carry the 23:59 marker across.
+        let today = Local::now().date_naive();
+        let naive = NaiveDateTime::new(today, NaiveTime::from_hms_opt(23, 59, 0).unwrap());
+        let previous = Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let tomorrow = today + Duration::days(1);
+        let out = reschedule_to(Some(previous), tomorrow)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!(out.time(), NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn submit_task_applies_quick_add_tokens_to_new_task() {
+        let mut app = App::default();
+        let mut ui = UiState {
+            current_input: "buy milk @home !3 ^tomorrow".into(),
+            ..UiState::default()
+        };
+        ui.submit_task(&mut app);
+        assert_eq!(app.tasks.len(), 1);
+        let t = &app.tasks[0];
+        assert_eq!(t.name, "buy milk");
+        assert_eq!(t.project.as_deref(), Some("home"));
+        assert_eq!(t.priority, Priority::High);
+        assert!(t.due_date.is_some());
+    }
+
+    #[test]
+    fn reschedule_today_sets_due_on_task_with_no_previous_date() {
+        let mut app = App::default();
+        app.tasks
+            .push(Task::new("thing".into(), None, Priority::Medium));
+        app.active_task_index = Some(0);
+        let mut ui = UiState::default();
+        ui.reschedule_today(&mut app);
+        let due = app.tasks[0].due_date.expect("t set a due date");
+        assert_eq!(
+            due.with_timezone(&Local).date_naive(),
+            Local::now().date_naive()
+        );
+    }
+
+    #[test]
+    fn submit_reschedule_with_empty_input_clears_due() {
+        let mut app = App::default();
+        let mut task = Task::new("thing".into(), None, Priority::Medium);
+        task.due_date = Some(Utc::now() + Duration::days(1));
+        app.tasks.push(task);
+        app.active_task_index = Some(0);
+        let mut ui = UiState::default();
+        ui.start_reschedule(&app);
+        ui.submit_reschedule(&mut app);
+        assert!(
+            app.tasks[0].due_date.is_none(),
+            "empty input clears due date"
+        );
+    }
+
+    #[test]
+    fn submit_reschedule_bad_input_flags_error_and_keeps_prompt_open() {
+        let mut app = App::default();
+        app.tasks
+            .push(Task::new("t".into(), None, Priority::Medium));
+        app.active_task_index = Some(0);
+        let mut ui = UiState::default();
+        ui.start_reschedule(&app);
+        ui.reschedule_input = "not a date".into();
+        ui.submit_reschedule(&mut app);
+        assert!(ui.reschedule_error);
+        assert!(matches!(ui.input_mode, InputMode::Rescheduling));
+        assert!(app.tasks[0].due_date.is_none());
     }
 }

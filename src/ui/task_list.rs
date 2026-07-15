@@ -1,6 +1,7 @@
 use chrono::{Local, Utc};
 use ratatui::{prelude::*, widgets::*};
 
+use crate::app::ui_state::parse_quick_add;
 use crate::app::{App, InputMode, Priority, SectionTone, Task, UiState};
 use crate::settings::Theme;
 
@@ -284,12 +285,40 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
     } else {
         ui.current_input.as_str()
     };
-    let input_title = if editing_sub {
-        "Add Subtask"
+    // Adding a new task? Show the quick-add parse preview inline in the title
+    // so users see how their `@!^` tokens are being interpreted.
+    let base_title = if editing_sub {
+        "Add Subtask".to_string()
     } else if ui.editing_task_index.is_some() {
-        "Rename Task"
+        "Rename Task".to_string()
     } else {
-        "New Task"
+        "New Task".to_string()
+    };
+    let input_title = if matches!(ui.input_mode, InputMode::Editing)
+        && ui.editing_task_index.is_none()
+        && !input_value.trim().is_empty()
+    {
+        let parsed = parse_quick_add(input_value);
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(p) = &parsed.project {
+            parts.push(format!("@{}", p));
+        }
+        if let Some(pr) = parsed.priority {
+            parts.push(format!("{} {}", pr.glyph(), pr.title()));
+        }
+        if let Some(due) = parsed.due {
+            parts.push(format!(
+                "◷ {}",
+                due.with_timezone(&Local).format("%m-%d %H:%M")
+            ));
+        }
+        if parts.is_empty() {
+            base_title
+        } else {
+            format!("{}  →  {}", base_title, parts.join("  "))
+        }
+    } else {
+        base_title
     };
     let input = Paragraph::new(input_value)
         .style(if input_active {
@@ -329,14 +358,41 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
                 chunks[3].y + 1,
             ));
         }
+        InputMode::Rescheduling => {
+            let (color, title) = if ui.reschedule_error {
+                (theme.high_color, "Reschedule — unknown shortcut")
+            } else {
+                (
+                    theme.accent_color,
+                    "Reschedule (today · tomorrow · mon..sun · nw · YYYY-MM-DD · empty=clear)",
+                )
+            };
+            let display = format!("^{}", ui.reschedule_input);
+            frame.render_widget(
+                Paragraph::new(display.as_str())
+                    .style(Style::default().fg(theme.medium_color))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .title(title)
+                            .style(Style::default().fg(color)),
+                    ),
+                chunks[3],
+            );
+            frame.set_cursor_position((
+                chunks[3].x + 1 + 1 + ui.reschedule_input.len() as u16,
+                chunks[3].y + 1,
+            ));
+        }
         _ => {
             let help_text = match ui.input_mode {
                 InputMode::Editing | InputMode::EditingSubtask => " [Enter] Submit | [Esc] Cancel ",
                 _ => {
-                    if chunks[3].width > 70 {
-                        " [↑/↓] Nav | [a]dd | [+] sub | [Spc] done | [e]dit | [g]roup | [/] find | [d]el | [?] help | [q]uit "
+                    if chunks[3].width > 82 {
+                        " [↑/↓] Nav | [a]dd | [Spc] done | [e]dit | [t/T/w/r] resched | [g]roup | [/] find | [d]el | [?] "
                     } else {
-                        " [↑↓][a][+][Spc][e][g][/][d][?][q] "
+                        " [↑↓][a][Spc][e][t/T/w/r][g][/][d][?][q] "
                     }
                 }
             };
@@ -411,11 +467,13 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App, theme: &Theme) {
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
     let rows = [
         ("↑/↓  j/k", "Move selection"),
-        ("a", "Add task"),
+        ("a", "Add task (tokens: @proj !prio ^date)"),
         ("+", "Add subtask"),
         ("Space / x", "Toggle done (task or selected subtask)"),
         ("Enter / e", "Edit sheet — name/project/priority/due/notes"),
         ("1 / 2 / 3", "Set priority Low/Med/High"),
+        ("t / T / w", "Reschedule: today / tomorrow / next week"),
+        ("r", "Reschedule prompt (today, mon..sun, YYYY-MM-DD, …)"),
         ("g", "Cycle grouping (Smart/Project/Priority/Manual)"),
         ("K / J", "Reorder task (Manual sort)"),
         ("Shift+A", "Toggle archived subtasks"),

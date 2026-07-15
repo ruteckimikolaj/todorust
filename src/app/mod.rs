@@ -254,6 +254,9 @@ pub enum InputMode {
     EditingSubtask,
     /// The all-attributes edit sheet is open (see [`ui_state::EditSheet`]).
     EditingSheet,
+    /// A one-line prompt asking for a date shortcut to reschedule the active
+    /// task (see [`ui_state::UiState::reschedule_input`]).
+    Rescheduling,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -535,6 +538,20 @@ impl App {
             if let Some(task) = self.tasks.get_mut(index) {
                 if !task.completed {
                     task.priority = priority;
+                }
+            }
+        }
+    }
+
+    /// Overwrite the active task's due date (used by `t`/`T`/`w`/`r` presets).
+    /// `None` clears the due date. The `due_notified` flag is reset so the
+    /// notification fires afresh once the new date passes.
+    pub fn set_active_due(&mut self, due: Option<DateTime<Utc>>) {
+        if let Some(index) = self.active_task_index {
+            if let Some(task) = self.tasks.get_mut(index) {
+                if !task.completed {
+                    task.due_date = due;
+                    task.due_notified = false;
                 }
             }
         }

@@ -443,4 +443,49 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn tasks_json_round_trip_preserves_all_fields() {
+        use crate::app::Recurrence;
+        use chrono::TimeZone;
+        let mut t = Task::new("json me".into(), Some("proj".into()), Priority::High);
+        t.recurrence = Some(Recurrence::EveryWeeks(2));
+        t.due_date = Some(Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap());
+        t.notes = Some("multi\nline".into());
+        t.subtasks.push(SubTask::new("s1".into()));
+        let uuid = t.uuid.clone();
+
+        let json = serde_json::to_string(&vec![t]).expect("serialise");
+        let round: Vec<Task> = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(round.len(), 1);
+        assert_eq!(round[0].uuid, uuid);
+        assert_eq!(round[0].name, "json me");
+        assert_eq!(round[0].project.as_deref(), Some("proj"));
+        assert_eq!(round[0].priority, Priority::High);
+        assert_eq!(round[0].recurrence, Some(Recurrence::EveryWeeks(2)));
+        assert_eq!(round[0].notes.as_deref(), Some("multi\nline"));
+        assert_eq!(round[0].subtasks.len(), 1);
+        assert_eq!(round[0].subtasks[0].name, "s1");
+    }
+
+    #[test]
+    fn tasks_json_deserialize_tolerates_missing_recurrence_field() {
+        // Documents that pre-Phase-5 JSON exports (no recurrence key) load cleanly.
+        let json = r#"[{
+            "uuid": "u1",
+            "name": "legacy",
+            "notes": null,
+            "project": null,
+            "priority": "Medium",
+            "due_date": null,
+            "due_notified": false,
+            "completed": false,
+            "creation_date": "2024-01-01T09:00:00Z",
+            "completion_date": null,
+            "subtasks": []
+        }]"#;
+        let tasks: Vec<Task> = serde_json::from_str(json).expect("deserialise legacy JSON");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].recurrence, None);
+    }
 }

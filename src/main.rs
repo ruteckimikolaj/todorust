@@ -30,7 +30,28 @@ use ui::{
 /// A minimalist, powerful to-do manager for your terminal.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Export all tasks (with subtasks) to a JSON file, or `-` for stdout.
+    Export {
+        /// Path to write JSON to. Use `-` for stdout.
+        path: String,
+    },
+    /// Import tasks from a JSON file previously produced by `export`. By default the
+    /// imported tasks are appended; pass `--replace` to overwrite the existing store.
+    Import {
+        /// Path to read JSON from. Use `-` for stdin.
+        path: String,
+        /// Replace the existing task store instead of appending.
+        #[arg(long)]
+        replace: bool,
+    },
+}
 
 fn main() -> io::Result<()> {
     // This panic hook ensures the terminal is restored even if a Rust-level panic occurs.
@@ -42,7 +63,15 @@ fn main() -> io::Result<()> {
         original_hook(panic_info);
     }));
 
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+
+    // Handle CLI subcommands without launching the TUI.
+    if let Some(cmd) = cli.command {
+        return match cmd {
+            Command::Export { path } => run_export(&path),
+            Command::Import { path, replace } => run_import(&path, replace),
+        };
+    }
 
     let mut terminal = setup_terminal()?;
 
@@ -51,6 +80,48 @@ fn main() -> io::Result<()> {
 
     run_app(&mut terminal, &mut app)?;
     restore_terminal(&mut terminal)?;
+    Ok(())
+}
+
+fn run_export(path: &str) -> io::Result<()> {
+    let settings = Settings::load();
+    let app = App::load_with_settings(settings);
+    let json = serde_json::to_string_pretty(&app.tasks).map_err(io::Error::other)?;
+    if path == "-" {
+        println!("{}", json);
+    } else {
+        std::fs::write(path, json)?;
+        eprintln!("Exported {} task(s) to {}", app.tasks.len(), path);
+    }
+    Ok(())
+}
+
+fn run_import(path: &str, replace: bool) -> io::Result<()> {
+    let raw = if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        std::fs::read_to_string(path)?
+    };
+    let incoming: Vec<app::Task> =
+        serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let settings = Settings::load();
+    let mut app = App::load_with_settings(settings);
+    let added = incoming.len();
+    if replace {
+        app.tasks = incoming;
+    } else {
+        app.tasks.extend(incoming);
+    }
+    app.save();
+    eprintln!(
+        "Imported {} task(s){} — store now has {}.",
+        added,
+        if replace { " (replaced existing)" } else { "" },
+        app.tasks.len()
+    );
     Ok(())
 }
 

@@ -224,8 +224,9 @@ pub enum InputMode {
     Editing,
     Filtering,
     EditingNotes,
-    EditingDue,
     EditingSubtask,
+    /// The all-attributes edit sheet is open (see [`ui_state::EditSheet`]).
+    EditingSheet,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -372,11 +373,12 @@ impl App {
         }
     }
 
-    pub fn cycle_active_priority(&mut self) {
+    /// Set the active task's priority directly (used by the `1`/`2`/`3` shortcuts).
+    pub fn set_active_priority(&mut self, priority: Priority) {
         if let Some(index) = self.active_task_index {
             if let Some(task) = self.tasks.get_mut(index) {
                 if !task.completed {
-                    task.priority = task.priority.cycle();
+                    task.priority = priority;
                 }
             }
         }

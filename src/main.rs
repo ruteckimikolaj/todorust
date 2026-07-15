@@ -19,10 +19,11 @@ mod app;
 mod db;
 mod settings;
 mod ui;
-use app::{App, InputMode, UiState, View};
+use app::ui_state::SheetField;
+use app::{App, InputMode, Priority, UiState, View};
 use settings::{Settings, Theme};
 use ui::{
-    draw_dashboard, draw_due_modal, draw_notes_modal, draw_settings, draw_statistics,
+    draw_dashboard, draw_edit_sheet, draw_notes_modal, draw_settings, draw_statistics,
     draw_task_details, draw_task_list,
 };
 
@@ -139,8 +140,8 @@ fn handle_key_event(key: KeyEvent, app: &mut App, ui: &mut UiState) {
         InputMode::Editing => handle_editing_input(key, app, ui),
         InputMode::Filtering => handle_filtering_input(key, ui),
         InputMode::EditingNotes => handle_editing_notes_input(key, app, ui),
-        InputMode::EditingDue => handle_editing_due_input(key, app, ui),
         InputMode::EditingSubtask => handle_editing_subtask_input(key, app, ui),
+        InputMode::EditingSheet => handle_editing_sheet_input(key, app, ui),
         InputMode::Normal => {
             if key.code == KeyCode::Char('o')
                 && key.modifiers == KeyModifiers::NONE
@@ -236,13 +237,12 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
                 ui.show_archived = !ui.show_archived;
             }
-            // Enter/e opens editing (rename for now; becomes the edit sheet in Phase 2).
-            KeyCode::Enter | KeyCode::Char('e') => ui.start_rename(app),
-            KeyCode::Char('E') if key.modifiers == KeyModifiers::SHIFT => {
-                ui.start_edit_notes_active(app)
-            }
-            KeyCode::Char('p') => app.cycle_active_priority(),
-            KeyCode::Char('D') if key.modifiers == KeyModifiers::SHIFT => ui.start_edit_due(app),
+            // Enter/e open the edit sheet — the one place all attributes are edited.
+            KeyCode::Enter | KeyCode::Char('e') => ui.open_edit_sheet(app),
+            // Fast priority set on the selected task.
+            KeyCode::Char('1') => app.set_active_priority(Priority::Low),
+            KeyCode::Char('2') => app.set_active_priority(Priority::Medium),
+            KeyCode::Char('3') => app.set_active_priority(Priority::High),
             KeyCode::Char('s') => app.cycle_sort_mode(),
             KeyCode::Char('/') => ui.input_mode = InputMode::Filtering,
             KeyCode::Down | KeyCode::Char('j') => ui.next_active_task(app),
@@ -323,22 +323,6 @@ fn handle_editing_notes_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
     }
 }
 
-fn handle_editing_due_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
-    match key.code {
-        KeyCode::Enter => ui.submit_due(app),
-        KeyCode::Esc => ui.cancel_due(),
-        KeyCode::Char(c) => {
-            ui.due_error = false;
-            ui.due_input.push(c);
-        }
-        KeyCode::Backspace => {
-            ui.due_error = false;
-            ui.due_input.pop();
-        }
-        _ => {}
-    }
-}
-
 fn handle_editing_subtask_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
     match key.code {
         KeyCode::Enter => ui.submit_subtask(app),
@@ -348,6 +332,68 @@ fn handle_editing_subtask_input(key: KeyEvent, app: &mut App, ui: &mut UiState) 
         }
         KeyCode::Esc => ui.cancel_subtask(),
         _ => {}
+    }
+}
+
+fn handle_editing_sheet_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
+    // Save / cancel take priority over field-local handling.
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+            ui.submit_sheet(app);
+            return;
+        }
+        (KeyCode::Esc, _) => {
+            ui.cancel_sheet();
+            return;
+        }
+        _ => {}
+    }
+
+    let Some(sheet) = ui.edit_sheet.as_mut() else {
+        return;
+    };
+
+    // Tab / Shift+Tab move between fields regardless of which field is focused.
+    match key.code {
+        KeyCode::Tab => {
+            sheet.field = sheet.field.next();
+            return;
+        }
+        KeyCode::BackTab => {
+            sheet.field = sheet.field.prev();
+            return;
+        }
+        _ => {}
+    }
+
+    match sheet.field {
+        SheetField::Priority => match key.code {
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                sheet.priority = sheet.priority.cycle();
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                // Cycle is Low→Med→High→Low; two hops backward = one step back.
+                sheet.priority = sheet.priority.cycle().cycle();
+            }
+            _ => {}
+        },
+        SheetField::Notes => {
+            sheet.notes.input(Input::from(key));
+        }
+        // Name / Project / Due are plain text fields.
+        _ => match key.code {
+            KeyCode::Char(c) => {
+                if let Some(buf) = ui.sheet_text_field_mut() {
+                    buf.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(buf) = ui.sheet_text_field_mut() {
+                    buf.pop();
+                }
+            }
+            _ => {}
+        },
     }
 }
 
@@ -393,7 +439,7 @@ fn ui(frame: &mut Frame, app: &App, ui_state: &UiState) {
     }
     match ui_state.input_mode {
         InputMode::EditingNotes => draw_notes_modal(frame, ui_state, &theme),
-        InputMode::EditingDue => draw_due_modal(frame, ui_state, &theme),
+        InputMode::EditingSheet => draw_edit_sheet(frame, ui_state, &theme),
         _ => {}
     }
 }

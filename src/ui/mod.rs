@@ -1,6 +1,6 @@
 pub mod dashboard;
 pub mod details;
-pub mod due_modal;
+pub mod edit_sheet;
 pub mod notes_modal;
 pub mod settings;
 pub mod statistics;
@@ -8,7 +8,7 @@ pub mod task_list;
 
 pub use dashboard::draw_dashboard;
 pub use details::draw_task_details;
-pub use due_modal::draw_due_modal;
+pub use edit_sheet::draw_edit_sheet;
 pub use notes_modal::draw_notes_modal;
 pub use settings::draw_settings;
 pub use statistics::draw_statistics;

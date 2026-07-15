@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 use ratatui_textarea::TextArea;
 
-use super::{App, InputMode, SubTask, Task, View};
+use super::{App, InputMode, Priority, SubTask, Task, View};
 use crate::settings::ColorTheme;
 
 /// Splits `"Buy milk @work"` → `("Buy milk", Some("work"))`.
@@ -57,6 +57,49 @@ pub fn parse_due(input: &str) -> Result<Option<chrono::DateTime<Utc>>, ()> {
 
 const SETTINGS_ROW_COUNT: usize = 3;
 
+/// The focusable fields of the [`EditSheet`], in Tab order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SheetField {
+    Name,
+    Project,
+    Priority,
+    Due,
+    Notes,
+}
+
+impl SheetField {
+    const ORDER: [SheetField; 5] = [
+        SheetField::Name,
+        SheetField::Project,
+        SheetField::Priority,
+        SheetField::Due,
+        SheetField::Notes,
+    ];
+
+    pub fn next(self) -> Self {
+        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(i + 1) % Self::ORDER.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+}
+
+/// State for the all-attributes edit sheet (Phase 2). One modal replaces the
+/// former standalone rename / priority / due / notes keybindings.
+pub struct EditSheet {
+    pub task_index: usize,
+    pub field: SheetField,
+    pub name: String,
+    pub project: String,
+    pub priority: Priority,
+    pub due: String,
+    pub due_error: bool,
+    pub notes: TextArea<'static>,
+}
+
 pub struct UiState {
     pub settings_selection: usize,
     pub completed_task_list_state: Option<usize>,
@@ -67,9 +110,6 @@ pub struct UiState {
     pub editing_task_index: Option<usize>,
     pub notes_textarea: Option<TextArea<'static>>,
     pub editing_notes_task_index: Option<usize>,
-    pub due_input: String,
-    pub due_error: bool,
-    pub editing_due_task_index: Option<usize>,
     /// When `Some`, a subtask row under the active parent is highlighted
     /// (index into that parent's visible-subtask list).
     pub selected_subtask: Option<usize>,
@@ -81,6 +121,8 @@ pub struct UiState {
     pub show_help: bool,
     /// When true, a delete-confirmation prompt is drawn; `y` confirms.
     pub confirm_delete: bool,
+    /// The open edit sheet, if any (`InputMode::EditingSheet`).
+    pub edit_sheet: Option<EditSheet>,
 }
 
 impl Default for UiState {
@@ -95,15 +137,13 @@ impl Default for UiState {
             editing_task_index: None,
             notes_textarea: None,
             editing_notes_task_index: None,
-            due_input: String::new(),
-            due_error: false,
-            editing_due_task_index: None,
             selected_subtask: None,
             subtask_input: String::new(),
             editing_subtask_parent: None,
             show_archived: false,
             show_help: false,
             confirm_delete: false,
+            edit_sheet: None,
         }
     }
 }
@@ -236,13 +276,6 @@ impl UiState {
         }
     }
 
-    // Open notes editor for the active task (called from TaskList)
-    pub fn start_edit_notes_active(&mut self, app: &App) {
-        if let Some(idx) = app.active_task_index {
-            self.open_notes_for_task(idx, app);
-        }
-    }
-
     pub fn submit_notes(&mut self, app: &mut App) {
         if let (Some(textarea), Some(idx)) = (
             self.notes_textarea.take(),
@@ -263,50 +296,6 @@ impl UiState {
     pub fn cancel_notes(&mut self) {
         self.notes_textarea = None;
         self.editing_notes_task_index = None;
-        self.input_mode = InputMode::Normal;
-    }
-
-    // --- Due-date editor ---
-
-    pub fn start_edit_due(&mut self, app: &App) {
-        if let Some(idx) = app.active_task_index {
-            if let Some(task) = app.tasks.get(idx) {
-                if !task.completed {
-                    self.due_input = task
-                        .due_date
-                        .map(|d| d.with_timezone(&Local).format(DUE_FORMAT).to_string())
-                        .unwrap_or_default();
-                    self.due_error = false;
-                    self.editing_due_task_index = Some(idx);
-                    self.input_mode = InputMode::EditingDue;
-                }
-            }
-        }
-    }
-
-    pub fn submit_due(&mut self, app: &mut App) {
-        match parse_due(&self.due_input) {
-            Ok(due) => {
-                if let Some(idx) = self.editing_due_task_index.take() {
-                    if let Some(task) = app.tasks.get_mut(idx) {
-                        task.due_date = due;
-                        task.due_notified = false;
-                    }
-                }
-                self.due_input.clear();
-                self.due_error = false;
-                self.input_mode = InputMode::Normal;
-            }
-            Err(_) => {
-                self.due_error = true;
-            }
-        }
-    }
-
-    pub fn cancel_due(&mut self) {
-        self.due_input.clear();
-        self.due_error = false;
-        self.editing_due_task_index = None;
         self.input_mode = InputMode::Normal;
     }
 
@@ -424,19 +413,112 @@ impl UiState {
 
     // --- New / rename task ---
 
-    pub fn start_rename(&mut self, app: &App) {
+    // --- Edit sheet (all attributes in one modal) ---
+
+    /// Open the edit sheet for the active task, seeded from its current values.
+    pub fn open_edit_sheet(&mut self, app: &App) {
         if let Some(idx) = app.active_task_index {
             if let Some(task) = app.tasks.get(idx) {
                 if !task.completed {
-                    self.editing_task_index = Some(idx);
-                    self.current_input = match &task.project {
-                        Some(p) => format!("{} @{}", task.name, p),
-                        None => task.name.clone(),
+                    let lines: Vec<String> = task
+                        .notes
+                        .as_deref()
+                        .unwrap_or("")
+                        .lines()
+                        .map(|l| l.to_owned())
+                        .collect();
+                    let mut notes = if lines.is_empty() {
+                        TextArea::default()
+                    } else {
+                        TextArea::new(lines)
                     };
-                    self.input_mode = InputMode::Editing;
+                    notes.set_placeholder_text("Notes…");
+                    self.edit_sheet = Some(EditSheet {
+                        task_index: idx,
+                        field: SheetField::Name,
+                        name: task.name.clone(),
+                        project: task.project.clone().unwrap_or_default(),
+                        priority: task.priority,
+                        due: task
+                            .due_date
+                            .map(|d| d.with_timezone(&Local).format(DUE_FORMAT).to_string())
+                            .unwrap_or_default(),
+                        due_error: false,
+                        notes,
+                    });
+                    self.input_mode = InputMode::EditingSheet;
                 }
             }
         }
+    }
+
+    /// Mutable handle to the buffer of the currently focused text field, if the
+    /// focused field is a plain text field (Name/Project/Due).
+    pub fn sheet_text_field_mut(&mut self) -> Option<&mut String> {
+        let sheet = self.edit_sheet.as_mut()?;
+        match sheet.field {
+            SheetField::Name => Some(&mut sheet.name),
+            SheetField::Project => Some(&mut sheet.project),
+            SheetField::Due => {
+                sheet.due_error = false;
+                Some(&mut sheet.due)
+            }
+            _ => None,
+        }
+    }
+
+    /// Validate and write the sheet back to its task. Keeps the sheet open on a
+    /// bad due date or empty name so the user can fix it.
+    pub fn submit_sheet(&mut self, app: &mut App) {
+        let Some(sheet) = self.edit_sheet.as_mut() else {
+            self.input_mode = InputMode::Normal;
+            return;
+        };
+        let name = sheet.name.trim().to_string();
+        if name.is_empty() {
+            sheet.field = SheetField::Name;
+            return;
+        }
+        let due = match parse_due(&sheet.due) {
+            Ok(d) => d,
+            Err(()) => {
+                sheet.due_error = true;
+                sheet.field = SheetField::Due;
+                return;
+            }
+        };
+        let idx = sheet.task_index;
+        let project = {
+            let p = sheet.project.trim();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.trim_start_matches('@').to_string())
+            }
+        };
+        let priority = sheet.priority;
+        let notes_text = sheet.notes.lines().join("\n");
+        if let Some(task) = app.tasks.get_mut(idx) {
+            task.name = name;
+            task.project = project;
+            task.priority = priority;
+            if task.due_date != due {
+                task.due_date = due;
+                task.due_notified = false;
+            }
+            task.notes = if notes_text.trim().is_empty() {
+                None
+            } else {
+                Some(notes_text)
+            };
+        }
+        self.edit_sheet = None;
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn cancel_sheet(&mut self) {
+        self.edit_sheet = None;
+        self.input_mode = InputMode::Normal;
     }
 
     pub fn submit_task(&mut self, app: &mut App) {
@@ -506,6 +588,45 @@ mod tests {
         assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), None));
         ui.previous_active_task(&mut app); // wrap to parent 1
         assert_eq!((app.active_task_index, ui.selected_subtask), (Some(1), None));
+    }
+
+    #[test]
+    fn edit_sheet_writes_all_fields_back() {
+        let mut app = App::default();
+        app.tasks
+            .push(Task::new("old".into(), None, Priority::Low));
+        app.active_task_index = Some(0);
+        let mut ui = UiState::default();
+        ui.open_edit_sheet(&app);
+        let sheet = ui.edit_sheet.as_mut().unwrap();
+        sheet.name = "new name".into();
+        sheet.project = "work".into();
+        sheet.priority = Priority::High;
+        sheet.due = "2026-08-01 09:30".into();
+        ui.submit_sheet(&mut app);
+        assert!(ui.edit_sheet.is_none());
+        let t = &app.tasks[0];
+        assert_eq!(t.name, "new name");
+        assert_eq!(t.project.as_deref(), Some("work"));
+        assert_eq!(t.priority, Priority::High);
+        assert!(t.due_date.is_some());
+    }
+
+    #[test]
+    fn edit_sheet_bad_due_keeps_sheet_open() {
+        let mut app = App::default();
+        app.tasks
+            .push(Task::new("t".into(), None, Priority::Medium));
+        app.active_task_index = Some(0);
+        let mut ui = UiState::default();
+        ui.open_edit_sheet(&app);
+        ui.edit_sheet.as_mut().unwrap().due = "not a date".into();
+        ui.submit_sheet(&mut app);
+        // Sheet stays open, flagged, focused on Due; task unchanged.
+        let sheet = ui.edit_sheet.as_ref().expect("sheet still open");
+        assert!(sheet.due_error);
+        assert_eq!(sheet.field, SheetField::Due);
+        assert!(app.tasks[0].due_date.is_none());
     }
 
     #[test]

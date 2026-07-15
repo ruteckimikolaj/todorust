@@ -1,27 +1,52 @@
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
-![https://spdx.org/licenses/CC-BY-NC-SA-4.0.json](https://img.shields.io/badge/License-CC%20%7C%20BY--NC--SA%204.0-green)
+![License](https://img.shields.io/badge/License-CC%20%7C%20BY--NC--SA%204.0-green)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
 ![Rust Version](https://img.shields.io/badge/rust-1.70.0-blue)
 
 # Todorust ✓
 
-A minimalist, powerful, terminal-based to-do manager written in Rust to help you stay organized and get things done. Shares its look and feel with [pomodorust](https://github.com/ruteckimikolaj/pomodorust).
+A minimalist, powerful, terminal-based to-do manager written in Rust. Fast to capture,
+organised by section, and safe to use daily. Shares its look and feel with
+[pomodorust](https://github.com/ruteckimikolaj/pomodorust).
 
 ## ✨ Features
 
-- **Task Management** — Create, rename, reorder, complete, and delete tasks. Assign tasks to projects using `@tag` syntax.
-- **Priorities** — Every task has a Low / Medium / High priority with a coloured glyph. Cycle it with `p`.
-- **Due Dates** — Set a date + time on any task (`Shift+D`). Overdue tasks are highlighted and trigger a desktop notification.
-- **Sorting** — Toggle the active list between Manual, Priority, and Due Date order with `s`.
-- **Dashboard** — A big block-art counter of open tasks plus today's overdue / due / completed totals.
-- **Task Notes** — Attach multi-line notes to any task. Edit with a full-screen modal editor (`Shift+E`).
-- **Search & Filter** — Press `/` to filter tasks by name, notes, or project tag in real time.
-- **Statistics** — Weekly completions bar chart, daily and all-time summary, and a searchable history of completed tasks with per-task details.
-- **Six Built-in Color Themes** — Default, Dracula, Solarized, Nord, Gruvbox Dark, Cyberpunk. Switchable from the settings panel with `←`/`→`.
-- **Custom Theme** — Define your own colors in `~/.config/todorust/config.toml` under `[custom_theme]`. Any unset field falls back to the Default theme.
-- **Desktop Notifications** — Native notifications when a task becomes due.
-- **SQLite Persistence** — Tasks and app state stored in a local SQLite database (`~/.local/share/todorust/todorust.db`). Settings persist separately as TOML (`~/.config/todorust/config.toml`).
-- **Cross-Platform** — Runs on macOS and Linux.
+- **Quick-add capture** — Type `Draft Q3 report @work !3 ^fri %weekly` and every token
+  (project, priority, due date, recurrence) is parsed into structured fields as you go,
+  with a live preview above the input.
+- **Grouped agenda** — The Task List is split into sections (Overdue / Today / Upcoming /
+  No date, or by project or priority). Cycle with `g`. A compact **Today strip** at the
+  top of the screen shows overdue/today counts at a glance.
+- **Single edit sheet** — `Enter` or `e` opens one modal that edits every attribute of a
+  task (name, project, priority, due, recurrence, notes). Retires per-attribute keys.
+- **Reschedule presets** — `t` = today, `T` = tomorrow, `w` = next week, `r` opens a
+  prompt (`mon`..`sun`, `YYYY-MM-DD`, empty = clear). The task's time-of-day is preserved
+  when it wasn't a placeholder.
+- **Recurring tasks** — `daily`, `weekly`, `monthly`, `2d` / `3w` / `1m`, or a weekday
+  name. Completing a recurring task instantly spawns the next occurrence with subtask
+  flags reset.
+- **Subtasks** — Add with `+`; done subtasks auto-archive after 24 h. Progress badge
+  `[2/5]` next to the parent.
+- **Bulk actions** — `v` marks the current task (`[•]` in the row); Space/x, d, and
+  1/2/3 then apply to the whole marked set. `Shift+V` clears marks.
+- **Priority gutter** — Priority is shown as a coloured left bar in every row for
+  fast scanning.
+- **Filter / search** — `/` narrows by name, notes, or project in real time.
+- **Statistics + Review** — Weekly bar chart, per-day sparkline on narrow terminals,
+  plus a review panel with completion rate, average age of open tasks, week-vs-week
+  trend, and top open projects.
+- **Delete with confirm** — A single keystroke never destroys data; `d` arms a `y/N`
+  prompt.
+- **Desktop notifications** — Native alerts when a task becomes due.
+- **Mouse support** — Wheel scrolls up/down through the current list.
+- **Import / Export JSON** — `todorust export tasks.json` and
+  `todorust import tasks.json [--replace]`. Use `-` for stdin/stdout to pipe.
+- **SQLite persistence** — Tasks and app state in a local SQLite database
+  (`~/.local/share/todorust/todorust.db`). Settings persist separately as TOML
+  (`~/.config/todorust/config.toml`).
+- **Six built-in themes** — Default, Dracula, Solarized, Nord, Gruvbox Dark,
+  Cyberpunk — plus a `[custom_theme]` config block.
+- **Cross-platform** — Runs on macOS and Linux.
 
 ## 📦 Installation
 
@@ -34,84 +59,100 @@ cargo install todorust
 ### Using Homebrew
 
 ```shell
-brew tap ruteckimikolaj/homebrew-tap
+brew tap ruteckimikolaj/tap
 brew install todorust
 ```
+
+### Download a release binary
+
+Prebuilt binaries for `linux-amd64`, `linux-arm64`, `darwin-amd64`, and `darwin-arm64`
+are attached to each [GitHub Release](https://github.com/ruteckimikolaj/todorust/releases).
 
 ## 🚀 Usage
 
 ```shell
-todorust
+todorust                         # launch the TUI
+todorust export tasks.json       # dump all tasks as JSON
+todorust import tasks.json       # append tasks from JSON
+todorust import backup.json --replace   # overwrite the store
 ```
 
-Controls are context-sensitive and shown at the bottom of each view.
+The bottom bar shows the essential keys; press `?` at any time in the Task List for a
+full keybinding overlay.
 
-**Global**
+### Quick-add tokens
+
+Type a task then any combination of these tokens; the parser strips them out and applies
+them to the new task.
+
+| Token | Meaning | Examples |
+| ----- | ------- | -------- |
+| `@name` | Project tag | `@work`, `@home` |
+| `!n` | Priority | `!1`/`!low`, `!2`/`!med`, `!3`/`!high` |
+| `^date` | Due date | `^today`, `^tomorrow`, `^fri`, `^nw`, `^2026-07-20`, `^2026-07-20 17:00` |
+| `%repeat` | Recurrence | `%daily`, `%weekly`, `%monthly`, `%2d`, `%3w`, `%1m`, `%mon`..`%sun` |
+
+Example: `Draft Q3 report @work !3 ^fri %weekly`.
+
+### Global keys
 
 | Key | Action |
 | --- | ------ |
+| `Tab` | Switch view (Task List ↔ Statistics) |
 | `o` | Open settings panel |
-| `q` | Quit |
-| `Tab` | Cycle views (Tasks → Statistics → Dashboard) |
+| `q` / `Ctrl+C` | Quit |
 
-**Task List**
-
-| Key | Action |
-| --- | ------ |
-| `↑` / `k`, `↓` / `j` | Navigate tasks and, within the selected task, its subtasks |
-| `Shift+↑` / `K`, `Shift+↓` / `J` | Reorder selected task (Manual sort only) |
-| `n` | New task (supports `@project` tag, e.g. `Buy milk @work`) |
-| `a` | Add a subtask to the selected task |
-| `Space` / `x` | Toggle the highlighted subtask done |
-| `Shift+A` | Show / hide archived subtasks (done > 24h) |
-| `e` | Rename selected task |
-| `p` | Cycle priority (Low → Medium → High) |
-| `Shift+D` | Set / clear due date (`YYYY-MM-DD HH:MM`) |
-| `s` | Cycle sort mode (Manual → Priority → Due Date) |
-| `Shift+E` | Edit notes for selected task |
-| `Enter` | Toggle task complete / incomplete |
-| `d` / `Delete` | Delete selected task |
-| `/` | Enter filter mode — narrow by name, notes, or `@project` |
-| `Esc` | Clear filter / cancel input |
-
-**Statistics**
+### Task List
 
 | Key | Action |
 | --- | ------ |
-| `↑` / `k`, `↓` / `j` | Navigate completed tasks |
+| `↑` / `k`, `↓` / `j` | Move selection (mouse wheel also works) |
+| `a` | Add task (accepts quick-add tokens) |
+| `+` | Add subtask to the selected task |
+| `Enter` / `e` | Open the edit sheet (all attributes) |
+| `Space` / `x` | Toggle done (task or highlighted subtask, or every marked task) |
+| `1` / `2` / `3` | Set priority Low / Medium / High (bulk when marks exist) |
+| `t` / `T` / `w` | Reschedule to today / tomorrow / next week |
+| `r` | Reschedule prompt |
+| `g` (or `s`) | Cycle grouping (Smart / Project / Priority / Manual) |
+| `K` / `J` (or `Shift+↑`/`↓`) | Reorder task (Manual grouping only) |
+| `v` | Toggle mark on active task for bulk actions |
+| `Shift+V` | Clear all marks |
+| `Shift+A` | Show / hide archived subtasks (done > 24 h) |
+| `/` | Filter / search (name, notes, project) |
+| `d` / `Delete` | Delete (with `y/N` confirmation; bulk when marks exist) |
+| `?` | Full help overlay |
+| `Esc` | Cancel input / clear filter |
+
+### Statistics
+
+| Key | Action |
+| --- | ------ |
+| `↑` / `k`, `↓` / `j` | Navigate completed tasks (mouse wheel too) |
 | `/` | Filter completed tasks |
 | `Enter` | View task details |
 | `d` / `Delete` | Delete selected task |
+| `Tab` | Back to Task List |
 
-**Settings**
+### Settings
 
 | Key | Action |
 | --- | ------ |
 | `↑` / `k`, `↓` / `j` | Select setting |
 | `←` / `h`, `→` / `l` | Change value |
-| `Tab` | Close settings |
+| `Tab` / `o` / `Esc` | Close settings |
 
-### Projects
-
-Append `@tag` anywhere in a task name to assign it to a project:
-
-```
-Write report @work
-Buy groceries @personal
-```
-
-The tag is stripped from the display name and shown as a coloured badge. Filter by `@work` or just `work`.
-
-### Data & Config Locations
+## 📁 Data & Config Locations
 
 | File | Purpose |
 | ---- | ------- |
 | `~/.local/share/todorust/todorust.db` | Tasks and app state (SQLite) |
 | `~/.config/todorust/config.toml` | Theme, priority, and notification settings |
 
-### Custom Theme
+## 🎨 Custom Theme
 
-Add a `[custom_theme]` table to `~/.config/todorust/config.toml`. All fields are optional hex strings — omit any to inherit from the Default theme.
+Add a `[custom_theme]` table to `~/.config/todorust/config.toml`. All fields are
+optional hex strings — omit any to inherit from the Default theme.
 
 ```toml
 [custom_theme]

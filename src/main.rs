@@ -7,7 +7,10 @@ use std::{
 use chrono::Utc;
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -58,7 +61,7 @@ fn main() -> io::Result<()> {
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let mut stdout = stdout();
-        execute!(stdout, LeaveAlternateScreen).unwrap();
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
         disable_raw_mode().unwrap();
         original_hook(panic_info);
     }));
@@ -128,14 +131,18 @@ fn run_import(path: &str, replace: bool) -> io::Result<()> {
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()
 }
 
@@ -154,8 +161,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> 
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if crossterm::event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                handle_key_event(key, app, &mut ui_state);
+            match event::read()? {
+                Event::Key(key) => handle_key_event(key, app, &mut ui_state),
+                Event::Mouse(mev) => handle_mouse_event(mev, app, &mut ui_state),
+                _ => {}
             }
         }
 
@@ -194,6 +203,27 @@ fn check_due_notifications(app: &mut App) {
                     .show();
             }
         }
+    }
+}
+
+fn handle_mouse_event(mev: MouseEvent, app: &mut App, ui: &mut UiState) {
+    // Only take mouse actions in Normal mode to avoid stealing focus while the
+    // user is typing in the quick-add / filter / reschedule prompts.
+    if !matches!(ui.input_mode, InputMode::Normal) {
+        return;
+    }
+    match mev.kind {
+        MouseEventKind::ScrollUp => match app.current_view {
+            View::TaskList => ui.previous_active_task(app),
+            View::Statistics => ui.previous_completed_task(app),
+            _ => {}
+        },
+        MouseEventKind::ScrollDown => match app.current_view {
+            View::TaskList => ui.next_active_task(app),
+            View::Statistics => ui.next_completed_task(app),
+            _ => {}
+        },
+        _ => {}
     }
 }
 

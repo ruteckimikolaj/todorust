@@ -345,6 +345,10 @@ pub struct UiState {
     pub reschedule_input: String,
     /// True after a failed parse in the reschedule prompt; the UI paints red.
     pub reschedule_error: bool,
+    /// Task uuids the user has marked with `v` for bulk actions. When
+    /// non-empty, bulk-op keys (Space/x, d, 1/2/3) act on this set instead
+    /// of the active task.
+    pub marked_uuids: std::collections::BTreeSet<String>,
 }
 
 impl Default for UiState {
@@ -368,6 +372,7 @@ impl Default for UiState {
             edit_sheet: None,
             reschedule_input: String::new(),
             reschedule_error: false,
+            marked_uuids: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -841,6 +846,31 @@ impl UiState {
 
     pub fn reschedule_next_week(&mut self, app: &mut App) {
         self.reschedule_active(app, Local::now().date_naive() + Duration::days(7));
+    }
+
+    // --- Bulk-action mark set (Phase 6) ---
+
+    /// Toggle the mark on the active task. No-op when there is no active task.
+    pub fn toggle_mark_active(&mut self, app: &App) {
+        if let Some(idx) = app.active_task_index {
+            if let Some(task) = app.tasks.get(idx) {
+                if !self.marked_uuids.remove(&task.uuid) {
+                    self.marked_uuids.insert(task.uuid.clone());
+                }
+            }
+        }
+    }
+
+    /// Drop every mark. Called on `V` and after any bulk action completes so
+    /// the selection does not silently carry over into the next intent.
+    pub fn clear_marks(&mut self) {
+        self.marked_uuids.clear();
+    }
+
+    /// True if any tasks are marked — used by `handle_tasklist_input` to route
+    /// keys to their bulk equivalents.
+    pub fn has_marks(&self) -> bool {
+        !self.marked_uuids.is_empty()
     }
 
     pub fn submit_task(&mut self, app: &mut App) {
@@ -1361,5 +1391,93 @@ mod tests {
         assert!(sheet.recurrence_error);
         assert_eq!(sheet.field, SheetField::Recurrence);
         assert_eq!(app.tasks[0].recurrence, None);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 6: bulk actions
+    // ------------------------------------------------------------------
+
+    fn app_with_three() -> App {
+        let mut app = App::default();
+        app.tasks.push(Task::new("one".into(), None, Priority::Low));
+        app.tasks.push(Task::new("two".into(), None, Priority::Low));
+        app.tasks
+            .push(Task::new("three".into(), None, Priority::Low));
+        app.active_task_index = Some(0);
+        app
+    }
+
+    #[test]
+    fn toggle_mark_adds_then_removes_active_task() {
+        let app = app_with_three();
+        let mut ui = UiState::default();
+        let uuid0 = app.tasks[0].uuid.clone();
+        ui.toggle_mark_active(&app);
+        assert!(ui.marked_uuids.contains(&uuid0));
+        assert!(ui.has_marks());
+        ui.toggle_mark_active(&app);
+        assert!(!ui.marked_uuids.contains(&uuid0));
+        assert!(!ui.has_marks());
+    }
+
+    #[test]
+    fn clear_marks_wipes_selection() {
+        let mut app = app_with_three();
+        let mut ui = UiState::default();
+        ui.toggle_mark_active(&app);
+        app.active_task_index = Some(1);
+        ui.toggle_mark_active(&app);
+        assert_eq!(ui.marked_uuids.len(), 2);
+        ui.clear_marks();
+        assert!(ui.marked_uuids.is_empty());
+    }
+
+    #[test]
+    fn bulk_complete_marks_all_selected_done() {
+        let mut app = app_with_three();
+        let mut marks = std::collections::BTreeSet::new();
+        marks.insert(app.tasks[0].uuid.clone());
+        marks.insert(app.tasks[2].uuid.clone());
+        app.bulk_complete(&marks);
+        assert!(app.tasks[0].completed);
+        assert!(!app.tasks[1].completed);
+        assert!(app.tasks[2].completed);
+    }
+
+    #[test]
+    fn bulk_complete_spawns_next_occurrence_for_recurring_tasks() {
+        let mut app = app_with_three();
+        app.tasks[1].recurrence = Some(Recurrence::EveryDays(1));
+        let mut marks = std::collections::BTreeSet::new();
+        marks.insert(app.tasks[1].uuid.clone());
+        app.bulk_complete(&marks);
+        assert_eq!(app.tasks.len(), 4, "spawned one new occurrence");
+        assert!(app.tasks[1].completed, "original done");
+        assert!(!app.tasks[2].completed, "spawned copy is open");
+        assert_eq!(app.tasks[2].name, "two");
+    }
+
+    #[test]
+    fn bulk_delete_removes_all_selected_tasks() {
+        let mut app = app_with_three();
+        let mut marks = std::collections::BTreeSet::new();
+        marks.insert(app.tasks[0].uuid.clone());
+        marks.insert(app.tasks[2].uuid.clone());
+        app.bulk_delete(&marks);
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].name, "two");
+    }
+
+    #[test]
+    fn bulk_set_priority_updates_only_marked_open_tasks() {
+        let mut app = app_with_three();
+        app.tasks[2].completed = true; // completed tasks must not change
+        let mut marks = std::collections::BTreeSet::new();
+        marks.insert(app.tasks[0].uuid.clone());
+        marks.insert(app.tasks[2].uuid.clone());
+        app.bulk_set_priority(&marks, Priority::High);
+        assert_eq!(app.tasks[0].priority, Priority::High);
+        assert_eq!(app.tasks[1].priority, Priority::Low, "unmarked untouched");
+        assert_eq!(app.tasks[2].priority, Priority::Low, "completed untouched");
     }
 }

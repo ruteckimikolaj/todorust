@@ -165,12 +165,21 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
         for &i in &section.indices {
             let task = &app.tasks[i];
             let is_active = Some(i) == app.active_task_index;
+            let is_marked = ui.marked_uuids.contains(&task.uuid);
             let marker = if is_active { "▶ " } else { "  " };
 
             if is_active && ui.selected_subtask.is_none() {
                 selected_pos = Some(list_items.len());
             }
 
+            let checkbox = if is_marked { " [•] " } else { " [ ] " };
+            let checkbox_style = if is_marked {
+                Style::default()
+                    .fg(theme.accent_color)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.base_fg)
+            };
             let mut spans = vec![
                 Span::styled(marker, Style::default().fg(theme.base_fg)),
                 Span::styled(
@@ -179,7 +188,7 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
                         .fg(priority_color(task.priority, theme))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" [ ] ", Style::default().fg(theme.base_fg)),
+                Span::styled(checkbox, checkbox_style),
                 Span::styled(task.name.clone(), Style::default().fg(theme.base_fg)),
             ];
             if let Some(proj) = &task.project {
@@ -390,24 +399,41 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
             ));
         }
         _ => {
-            let help_text = match ui.input_mode {
-                InputMode::Editing | InputMode::EditingSubtask => " [Enter] Submit | [Esc] Cancel ",
-                _ => {
-                    if chunks[3].width > 82 {
-                        " [↑/↓] Nav | [a]dd | [Spc] done | [e]dit | [t/T/w/r] resched | [g]roup | [/] find | [d]el | [?] "
-                    } else {
-                        " [↑↓][a][Spc][e][t/T/w/r][g][/][d][?][q] "
-                    }
+            let n_marked = ui.marked_uuids.len();
+            let title = if n_marked > 0 {
+                format!("Controls — {} selected", n_marked)
+            } else {
+                "Controls".to_string()
+            };
+            let help_text: std::borrow::Cow<'static, str> = match ui.input_mode {
+                InputMode::Editing | InputMode::EditingSubtask => {
+                    std::borrow::Cow::Borrowed(" [Enter] Submit | [Esc] Cancel ")
                 }
+                _ if n_marked > 0 => std::borrow::Cow::Owned(format!(
+                    " {} marked | [Spc] done all | [d]el all | [1/2/3] prio | [v] toggle | [V] clear ",
+                    n_marked
+                )),
+                _ => std::borrow::Cow::Borrowed(if chunks[3].width > 82 {
+                    " [↑/↓] Nav | [a]dd | [Spc] done | [e]dit | [t/T/w/r] resched | [g]roup | [/] find | [v] mark | [d]el | [?] "
+                } else {
+                    " [↑↓][a][Spc][e][t/T/w/r][g][/][v][d][?][q] "
+                }),
+            };
+            let title_style = if n_marked > 0 {
+                Style::default()
+                    .fg(theme.accent_color)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.help_text_fg)
             };
             frame.render_widget(
-                Paragraph::new(help_text)
+                Paragraph::new(help_text.as_ref())
                     .block(
                         Block::default()
-                            .title("Controls")
+                            .title(title)
                             .borders(Borders::ALL)
                             .border_type(BorderType::Rounded)
-                            .style(Style::default().fg(theme.help_text_fg)),
+                            .style(title_style),
                     )
                     .alignment(Alignment::Center),
                 chunks[3],
@@ -480,6 +506,8 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
         ("r", "Reschedule prompt (today, mon..sun, YYYY-MM-DD, …)"),
         ("g", "Cycle grouping (Smart/Project/Priority/Manual)"),
         ("K / J", "Reorder task (Manual sort)"),
+        ("v", "Mark / unmark task for bulk actions"),
+        ("Shift+V", "Clear all marks"),
         ("Shift+A", "Toggle archived subtasks"),
         ("/", "Filter / search"),
         ("d / Del", "Delete (with confirm)"),

@@ -202,7 +202,21 @@ covered by tests. Touches `src/app/mod.rs`, `src/app/ui_state.rs` (`parse_recurr
 `ParsedQuickAdd.recurrence`, `SheetField::Recurrence`), `src/db.rs`, `src/ui/edit_sheet.rs`,
 `src/ui/task_list.rs`.
 
-**Phase 6 — Polish.** Review stats, mouse, bulk actions, import/export, priority gutter.
+**Phase 6 — Polish. ✅ DONE.** Five subtasks landed as independent commits:
+- **Review panel** — Statistics view gained a "Review" section (completion rate, avg age of
+  open tasks, this-week-vs-last-week trend, top three projects by open count). Helpers are
+  unit-tested.
+- **Priority gutter** — Task List rows now show priority as a coloured left gutter bar
+  (`▍`) in the priority colour, replacing the inline glyph.
+- **Import / Export** — `todorust export <path>` / `todorust import <path> [--replace]`
+  CLI subcommands, JSON via serde, `-` for stdin/stdout. Two schema-lock tests.
+- **Mouse scroll** — crossterm mouse capture enabled; ScrollUp / ScrollDown route to the
+  existing previous/next-task helpers in Normal mode. Click-select deferred until the
+  render layer exposes row-to-task mappings.
+- **Bulk actions** — `v` toggles a mark on the active task (rendered as `[•]` in the row),
+  `Shift+V` clears marks; when the marked set is non-empty, Space/x, d/Del, and 1/2/3
+  fan out via new `App::bulk_complete` / `bulk_delete` / `bulk_set_priority`. The bottom
+  bar title shows `"Controls — N selected"` and the help string switches to bulk verbs.
 
 Recommendation: do **Phase 1 first and on its own** — it directly fixes the overflowing,
 unintuitive control bar and makes the app safe to use daily, without waiting on the larger

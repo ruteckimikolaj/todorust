@@ -685,6 +685,69 @@ impl App {
         }
     }
 
+    // --- Bulk actions on a marked set (Phase 6) ---
+    //
+    // These match the single-target verbs but iterate the whole `uuids` set.
+    // The active-task cursor is preserved when possible; otherwise it snaps
+    // to the first remaining incomplete task.
+
+    /// Mark every task in `uuids` complete (idempotent — already-done tasks
+    /// stay done). Recurring tasks in the set each spawn their next
+    /// occurrence in place, mirroring the single-task path.
+    pub fn bulk_complete(&mut self, uuids: &std::collections::BTreeSet<String>) {
+        if uuids.is_empty() {
+            return;
+        }
+        let now = Utc::now();
+        // Iterate by index to allow spawn insertions; walk *backwards* so
+        // that inserting at `i+1` doesn't shift the tasks we still need to
+        // visit.
+        let mut i = self.tasks.len();
+        while i > 0 {
+            i -= 1;
+            let (should_complete, recurrence) = match self.tasks.get(i) {
+                Some(t) if !t.completed && uuids.contains(&t.uuid) => (true, t.recurrence),
+                _ => (false, None),
+            };
+            if !should_complete {
+                continue;
+            }
+            if let Some(t) = self.tasks.get_mut(i) {
+                t.completed = true;
+                t.completion_date = Some(now);
+            }
+            if let Some(rec) = recurrence {
+                self.spawn_next_occurrence(i, rec);
+            }
+        }
+        self.active_task_index = self.first_active_index();
+    }
+
+    /// Remove every task in `uuids` from the store.
+    pub fn bulk_delete(&mut self, uuids: &std::collections::BTreeSet<String>) {
+        if uuids.is_empty() {
+            return;
+        }
+        self.tasks.retain(|t| !uuids.contains(&t.uuid));
+        self.active_task_index = self.first_active_index();
+    }
+
+    /// Set the given priority on every incomplete task in `uuids`.
+    pub fn bulk_set_priority(
+        &mut self,
+        uuids: &std::collections::BTreeSet<String>,
+        priority: Priority,
+    ) {
+        if uuids.is_empty() {
+            return;
+        }
+        for t in self.tasks.iter_mut() {
+            if !t.completed && uuids.contains(&t.uuid) {
+                t.priority = priority;
+            }
+        }
+    }
+
     pub fn cycle_grouping_mode(&mut self) {
         self.grouping_mode = self.grouping_mode.cycle();
     }

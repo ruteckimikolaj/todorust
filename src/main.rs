@@ -275,8 +275,14 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
     if ui.confirm_delete {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                ui.selected_subtask = None;
-                app.delete_active_task();
+                if ui.has_marks() {
+                    let marks = std::mem::take(&mut ui.marked_uuids);
+                    app.bulk_delete(&marks);
+                    ui.selected_subtask = None;
+                } else {
+                    ui.selected_subtask = None;
+                    app.delete_active_task();
+                }
             }
             _ => {}
         }
@@ -315,10 +321,14 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             // `a`dd a top-level task; `+` adds a subtask under the active parent.
             KeyCode::Char('a') => ui.input_mode = InputMode::Editing,
             KeyCode::Char('+') => ui.start_add_subtask(app),
-            // Space/x is the checkbox: toggle the highlighted subtask if one is
-            // selected, otherwise toggle the parent task's done state.
+            // Space/x is the checkbox: bulk-complete every marked task when a
+            // selection exists; otherwise toggle the highlighted subtask, or
+            // fall back to the active task's done state.
             KeyCode::Char(' ') | KeyCode::Char('x') => {
-                if ui.selected_subtask.is_some() {
+                if ui.has_marks() {
+                    let marks = std::mem::take(&mut ui.marked_uuids);
+                    app.bulk_complete(&marks);
+                } else if ui.selected_subtask.is_some() {
                     ui.toggle_selected_subtask(app);
                 } else {
                     app.complete_active_task();
@@ -329,10 +339,34 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             }
             // Enter/e open the edit sheet — the one place all attributes are edited.
             KeyCode::Enter | KeyCode::Char('e') => ui.open_edit_sheet(app),
-            // Fast priority set on the selected task.
-            KeyCode::Char('1') => app.set_active_priority(Priority::Low),
-            KeyCode::Char('2') => app.set_active_priority(Priority::Medium),
-            KeyCode::Char('3') => app.set_active_priority(Priority::High),
+            // Toggle mark on active task; Shift+V clears all marks.
+            KeyCode::Char('v') => ui.toggle_mark_active(app),
+            KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => ui.clear_marks(),
+            // Fast priority set on the selected task (bulk when marks exist).
+            KeyCode::Char('1') => {
+                if ui.has_marks() {
+                    let marks = ui.marked_uuids.clone();
+                    app.bulk_set_priority(&marks, Priority::Low);
+                } else {
+                    app.set_active_priority(Priority::Low);
+                }
+            }
+            KeyCode::Char('2') => {
+                if ui.has_marks() {
+                    let marks = ui.marked_uuids.clone();
+                    app.bulk_set_priority(&marks, Priority::Medium);
+                } else {
+                    app.set_active_priority(Priority::Medium);
+                }
+            }
+            KeyCode::Char('3') => {
+                if ui.has_marks() {
+                    let marks = ui.marked_uuids.clone();
+                    app.bulk_set_priority(&marks, Priority::High);
+                } else {
+                    app.set_active_priority(Priority::High);
+                }
+            }
             // Reschedule presets: today / tomorrow / next week / prompt.
             KeyCode::Char('t') => ui.reschedule_today(app),
             KeyCode::Char('T') if key.modifiers == KeyModifiers::SHIFT => {

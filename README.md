@@ -1,13 +1,18 @@
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![License](https://img.shields.io/badge/License-CC%20%7C%20BY--NC--SA%204.0-green)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
-![Rust Version](https://img.shields.io/badge/rust-1.70.0-blue)
+![Rust Version](https://img.shields.io/badge/rust-1.88.0-blue)
 
 # Todorust ✓
 
 A minimalist, powerful, terminal-based to-do manager written in Rust. Fast to capture,
-organised by section, and safe to use daily. Shares its look and feel with
-[pomodorust](https://github.com/ruteckimikolaj/pomodorust).
+organised by section, and safe to use daily.
+
+Inspired by [pomodorust](https://github.com/ruteckimikolaj/pomodorust) — its sibling
+terminal Pomodoro timer — Todorust shares that project's look, feel, and design
+principles: `@tag` projects, real-time `/` search, weekly statistics, six built-in
+themes with a `[custom_theme]` override, native desktop notifications, and SQLite
+persistence.
 
 ## ✨ Features
 

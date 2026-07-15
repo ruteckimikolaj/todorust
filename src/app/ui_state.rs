@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 use ratatui_textarea::TextArea;
 
-use super::{App, InputMode, Task, View};
+use super::{App, InputMode, SubTask, Task, View};
 use crate::settings::ColorTheme;
 
 /// Splits `"Buy milk @work"` → `("Buy milk", Some("work"))`.
@@ -70,6 +70,13 @@ pub struct UiState {
     pub due_input: String,
     pub due_error: bool,
     pub editing_due_task_index: Option<usize>,
+    /// When `Some`, a subtask row under the active parent is highlighted
+    /// (index into that parent's visible-subtask list).
+    pub selected_subtask: Option<usize>,
+    pub subtask_input: String,
+    pub editing_subtask_parent: Option<usize>,
+    /// Reveal the collapsed archived section of the active parent's checklist.
+    pub show_archived: bool,
 }
 
 impl Default for UiState {
@@ -87,6 +94,10 @@ impl Default for UiState {
             due_input: String::new(),
             due_error: false,
             editing_due_task_index: None,
+            selected_subtask: None,
+            subtask_input: String::new(),
+            editing_subtask_parent: None,
+            show_archived: false,
         }
     }
 }
@@ -295,30 +306,114 @@ impl UiState {
 
     // --- Active-task navigation (sort- and filter-aware) ---
 
+    /// Move selection down. Steps into the active parent's subtasks, then on
+    /// to the next parent once past the last subtask.
     pub fn next_active_task(&mut self, app: &mut App) {
         let indices = app.ordered_active_indices(&self.filter_input.to_lowercase());
         if indices.is_empty() {
             app.active_task_index = None;
+            self.selected_subtask = None;
             return;
         }
+        let now = Utc::now();
         let cur = app.active_task_index.unwrap_or(usize::MAX);
-        let next = indices
-            .iter()
-            .position(|&i| i == cur)
-            .map_or(0, |p| (p + 1) % indices.len());
-        app.active_task_index = Some(indices[next]);
+        match indices.iter().position(|&i| i == cur) {
+            None => {
+                app.active_task_index = Some(indices[0]);
+                self.selected_subtask = None;
+            }
+            Some(p) => {
+                let vis = app.tasks[indices[p]]
+                    .visible_subtask_indices(self.show_archived, now)
+                    .len();
+                match self.selected_subtask {
+                    Some(s) if s + 1 < vis => self.selected_subtask = Some(s + 1),
+                    Some(_) => {
+                        app.active_task_index = Some(indices[(p + 1) % indices.len()]);
+                        self.selected_subtask = None;
+                    }
+                    None if vis > 0 => self.selected_subtask = Some(0),
+                    None => {
+                        app.active_task_index = Some(indices[(p + 1) % indices.len()]);
+                        self.selected_subtask = None;
+                    }
+                }
+            }
+        }
     }
 
+    /// Move selection up. Steps back out of subtasks to the parent row, then on
+    /// to the previous parent.
     pub fn previous_active_task(&mut self, app: &mut App) {
         let indices = app.ordered_active_indices(&self.filter_input.to_lowercase());
         if indices.is_empty() {
             app.active_task_index = None;
+            self.selected_subtask = None;
             return;
         }
         let cur = app.active_task_index.unwrap_or(usize::MAX);
-        let pos = indices.iter().position(|&i| i == cur).unwrap_or(0);
-        let prev = if pos == 0 { indices.len() - 1 } else { pos - 1 };
-        app.active_task_index = Some(indices[prev]);
+        match indices.iter().position(|&i| i == cur) {
+            None => {
+                app.active_task_index = Some(indices[0]);
+                self.selected_subtask = None;
+            }
+            Some(p) => match self.selected_subtask {
+                Some(0) => self.selected_subtask = None,
+                Some(s) => self.selected_subtask = Some(s - 1),
+                None => {
+                    let prev = if p == 0 { indices.len() - 1 } else { p - 1 };
+                    app.active_task_index = Some(indices[prev]);
+                    self.selected_subtask = None;
+                }
+            },
+        }
+    }
+
+    // --- Subtasks ---
+
+    /// Open the inline input to add a subtask under the active parent.
+    pub fn start_add_subtask(&mut self, app: &App) {
+        if let Some(idx) = app.active_task_index {
+            if app.tasks.get(idx).is_some_and(|t| !t.completed) {
+                self.editing_subtask_parent = Some(idx);
+                self.subtask_input.clear();
+                self.input_mode = InputMode::EditingSubtask;
+            }
+        }
+    }
+
+    pub fn submit_subtask(&mut self, app: &mut App) {
+        if let Some(idx) = self.editing_subtask_parent.take() {
+            let name = self.subtask_input.trim().to_string();
+            if !name.is_empty() {
+                if let Some(task) = app.tasks.get_mut(idx) {
+                    task.subtasks.push(SubTask::new(name));
+                }
+            }
+        }
+        self.subtask_input.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn cancel_subtask(&mut self) {
+        self.subtask_input.clear();
+        self.editing_subtask_parent = None;
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Toggle the `done` state of the currently highlighted subtask.
+    pub fn toggle_selected_subtask(&mut self, app: &mut App) {
+        if let (Some(pidx), Some(sel)) = (app.active_task_index, self.selected_subtask) {
+            let now = Utc::now();
+            if let Some(task) = app.tasks.get_mut(pidx) {
+                let vis = task.visible_subtask_indices(self.show_archived, now);
+                if let Some(&si) = vis.get(sel) {
+                    if let Some(sub) = task.subtasks.get_mut(si) {
+                        sub.toggle();
+                    }
+                }
+            }
+        }
     }
 
     // --- New / rename task ---
@@ -361,5 +456,62 @@ impl UiState {
             }
             self.input_mode = InputMode::Normal;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Priority, SubTask, Task};
+
+    fn app_with_two() -> App {
+        let mut app = App::default();
+        let mut p0 = Task::new("p0".into(), None, Priority::Medium);
+        p0.subtasks.push(SubTask::new("s0".into()));
+        p0.subtasks.push(SubTask::new("s1".into()));
+        app.tasks.push(p0);
+        app.tasks.push(Task::new("p1".into(), None, Priority::Medium));
+        app.active_task_index = Some(0);
+        app
+    }
+
+    #[test]
+    fn down_steps_into_subtasks_then_next_parent() {
+        let mut app = app_with_two();
+        let mut ui = UiState::default();
+        // parent 0 selected, no subtask
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), None));
+        ui.next_active_task(&mut app); // -> s0
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), Some(0)));
+        ui.next_active_task(&mut app); // -> s1
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), Some(1)));
+        ui.next_active_task(&mut app); // past last -> parent 1
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(1), None));
+    }
+
+    #[test]
+    fn up_steps_back_out_of_subtasks() {
+        let mut app = app_with_two();
+        let mut ui = UiState::default();
+        ui.selected_subtask = Some(1); // on s1 of parent 0
+        ui.previous_active_task(&mut app); // -> s0
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), Some(0)));
+        ui.previous_active_task(&mut app); // -> parent row
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), None));
+        ui.previous_active_task(&mut app); // wrap to parent 1
+        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(1), None));
+    }
+
+    #[test]
+    fn toggle_selected_subtask_marks_done() {
+        let mut app = app_with_two();
+        let mut ui = UiState::default();
+        ui.selected_subtask = Some(0);
+        ui.toggle_selected_subtask(&mut app);
+        assert!(app.tasks[0].subtasks[0].done);
+        assert!(app.tasks[0].subtasks[0].completion_date.is_some());
+        ui.toggle_selected_subtask(&mut app);
+        assert!(!app.tasks[0].subtasks[0].done);
+        assert!(app.tasks[0].subtasks[0].completion_date.is_none());
     }
 }

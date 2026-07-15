@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Result};
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::app::{App, Priority, SortMode, Task, View};
+use crate::app::{new_uuid, App, Priority, SortMode, SubTask, Task, View};
 
 pub fn open_and_init(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -16,6 +17,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS tasks (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             sort_order      INTEGER NOT NULL DEFAULT 0,
+            uuid            TEXT,
             name            TEXT NOT NULL,
             notes           TEXT,
             project         TEXT,
@@ -26,11 +28,24 @@ fn init_schema(conn: &Connection) -> Result<()> {
             creation_date   TEXT NOT NULL,
             completion_date TEXT
         );
+        CREATE TABLE IF NOT EXISTS subtasks (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_uuid       TEXT NOT NULL,
+            sort_order      INTEGER NOT NULL DEFAULT 0,
+            name            TEXT NOT NULL,
+            done            INTEGER NOT NULL DEFAULT 0,
+            creation_date   TEXT NOT NULL,
+            completion_date TEXT
+        );
         CREATE TABLE IF NOT EXISTS app_state (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );",
-    )
+    )?;
+    // Migrate databases created before the uuid column existed. Ignore the
+    // error raised when the column is already present.
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN uuid TEXT", []);
+    Ok(())
 }
 
 fn get_state(conn: &Connection, key: &str) -> Option<String> {
@@ -93,8 +108,9 @@ pub fn load_from(conn: &Connection) -> LoadedState {
 }
 
 fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
+    let mut subtasks_by_uuid = load_subtasks(conn).unwrap_or_default();
     let mut stmt = conn.prepare(
-        "SELECT name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date
+        "SELECT name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date, uuid
          FROM tasks ORDER BY sort_order ASC",
     )?;
     let tasks = stmt
@@ -102,7 +118,15 @@ fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
             let due_str: Option<String> = row.get(4)?;
             let creation_str: String = row.get(7)?;
             let completion_str: Option<String> = row.get(8)?;
+            // Legacy rows may have a NULL/empty uuid; mint one so subtasks can
+            // key to it. Regenerated ids are persisted on the next save.
+            let uuid = row
+                .get::<_, Option<String>>(9)?
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(new_uuid);
+            let subtasks = subtasks_by_uuid.remove(&uuid).unwrap_or_default();
             Ok(Task {
+                uuid,
                 name: row.get(0)?,
                 notes: row.get(1)?,
                 project: row.get(2)?,
@@ -114,6 +138,7 @@ fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
                     .parse::<DateTime<Utc>>()
                     .unwrap_or_else(|_| Utc::now()),
                 completion_date: completion_str.and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+                subtasks,
             })
         })?
         .filter_map(|r| r.ok())
@@ -121,9 +146,36 @@ fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
     Ok(tasks)
 }
 
+fn load_subtasks(conn: &Connection) -> Result<HashMap<String, Vec<SubTask>>> {
+    let mut stmt = conn.prepare(
+        "SELECT task_uuid, name, done, creation_date, completion_date
+         FROM subtasks ORDER BY sort_order ASC",
+    )?;
+    let mut map: HashMap<String, Vec<SubTask>> = HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        let task_uuid: String = row.get(0)?;
+        let creation_str: String = row.get(3)?;
+        let completion_str: Option<String> = row.get(4)?;
+        let sub = SubTask {
+            name: row.get(1)?,
+            done: row.get::<_, i64>(2)? != 0,
+            creation_date: creation_str
+                .parse::<DateTime<Utc>>()
+                .unwrap_or_else(|_| Utc::now()),
+            completion_date: completion_str.and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+        };
+        Ok((task_uuid, sub))
+    })?;
+    for r in rows.flatten() {
+        map.entry(r.0).or_default().push(r.1);
+    }
+    Ok(map)
+}
+
 pub fn save_to(conn: &mut Connection, app: &App) -> Result<()> {
     let tx = conn.transaction()?;
     save_tasks(&tx, &app.tasks)?;
+    save_subtasks(&tx, &app.tasks)?;
     save_app_state(&tx, app)?;
     tx.commit()
 }
@@ -132,10 +184,11 @@ fn save_tasks(conn: &Connection, tasks: &[Task]) -> Result<()> {
     conn.execute("DELETE FROM tasks", [])?;
     for (i, task) in tasks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO tasks (sort_order, name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO tasks (sort_order, uuid, name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 i as i64,
+                task.uuid,
                 task.name,
                 task.notes,
                 task.project,
@@ -147,6 +200,27 @@ fn save_tasks(conn: &Connection, tasks: &[Task]) -> Result<()> {
                 task.completion_date.map(|d| d.to_rfc3339()),
             ],
         )?;
+    }
+    Ok(())
+}
+
+fn save_subtasks(conn: &Connection, tasks: &[Task]) -> Result<()> {
+    conn.execute("DELETE FROM subtasks", [])?;
+    for task in tasks {
+        for (j, sub) in task.subtasks.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO subtasks (task_uuid, sort_order, name, done, creation_date, completion_date)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    task.uuid,
+                    j as i64,
+                    sub.name,
+                    sub.done as i64,
+                    sub.creation_date.to_rfc3339(),
+                    sub.completion_date.map(|d| d.to_rfc3339()),
+                ],
+            )?;
+        }
     }
     Ok(())
 }
@@ -184,4 +258,97 @@ fn save_app_state(conn: &Connection, app: &App) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+
+    #[test]
+    fn subtasks_round_trip() {
+        let dir = std::env::temp_dir().join(format!("todorust_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rt.db");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = App::default();
+        let mut t = Task::new("parent".into(), Some("proj".into()), Priority::High);
+        let uuid = t.uuid.clone();
+        let mut done_sub = SubTask::new("done one".into());
+        done_sub.toggle(); // marks done + completion_date
+        t.subtasks.push(done_sub);
+        t.subtasks.push(SubTask::new("open one".into()));
+        app.tasks.push(t);
+
+        let mut conn = open_and_init(&path).unwrap();
+        save_to(&mut conn, &app).unwrap();
+
+        let loaded = load_from(&conn);
+        assert_eq!(loaded.tasks.len(), 1);
+        let lt = &loaded.tasks[0];
+        assert_eq!(lt.uuid, uuid, "uuid must survive save/load");
+        assert_eq!(lt.subtasks.len(), 2, "both subtasks persisted in order");
+        assert_eq!(lt.subtasks[0].name, "done one");
+        assert!(lt.subtasks[0].done && lt.subtasks[0].completion_date.is_some());
+        assert_eq!(lt.subtasks[1].name, "open one");
+        assert!(!lt.subtasks[1].done);
+        assert_eq!(lt.subtask_progress(), Some((1, 2)));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_db_without_uuid_migrates() {
+        let dir = std::env::temp_dir().join(format!("todorust_test_leg_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Simulate a pre-uuid schema: tasks table without the uuid column.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    name TEXT NOT NULL,
+                    notes TEXT, project TEXT,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    due_date TEXT, due_notified INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    creation_date TEXT NOT NULL, completion_date TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (sort_order, name, priority, completed, creation_date)
+                 VALUES (0, 'old task', 1, 0, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        // open_and_init must ALTER in the uuid column without error.
+        let conn = open_and_init(&path).unwrap();
+        let loaded = load_from(&conn);
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].name, "old task");
+        assert!(
+            !loaded.tasks[0].uuid.is_empty(),
+            "migrated task gets a minted uuid"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn archive_threshold() {
+        let mut s = SubTask::new("x".into());
+        s.done = true;
+        s.completion_date = Some(Utc::now() - chrono::Duration::hours(25));
+        assert!(s.is_archived(Utc::now()), ">24h done → archived");
+        s.completion_date = Some(Utc::now() - chrono::Duration::hours(1));
+        assert!(!s.is_archived(Utc::now()), "recent done → active");
+    }
 }

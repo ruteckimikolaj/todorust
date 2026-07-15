@@ -58,9 +58,12 @@ Controls are context-sensitive and shown at the bottom of each view.
 
 | Key | Action |
 | --- | ------ |
-| `↑` / `k`, `↓` / `j` | Navigate tasks |
+| `↑` / `k`, `↓` / `j` | Navigate tasks and, within the selected task, its subtasks |
 | `Shift+↑` / `K`, `Shift+↓` / `J` | Reorder selected task (Manual sort only) |
 | `n` | New task (supports `@project` tag, e.g. `Buy milk @work`) |
+| `a` | Add a subtask to the selected task |
+| `Space` / `x` | Toggle the highlighted subtask done |
+| `Shift+A` | Show / hide archived subtasks (done > 24h) |
 | `e` | Rename selected task |
 | `p` | Cycle priority (Low → Medium → High) |
 | `Shift+D` | Set / clear due date (`YYYY-MM-DD HH:MM`) |

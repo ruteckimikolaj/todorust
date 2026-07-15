@@ -1,6 +1,15 @@
 # Deferred feature: Subtasks / checklists
 
-Status: **NOT IMPLEMENTED**. Build only after the core to-do app compiles and runs as expected.
+Status: **IMPLEMENTED** (2026-07-15).
+
+## Decisions made during implementation
+
+- **Parent key** — added a persistent `uuid` to `Task` (serde default + SQLite column, migrated via `ALTER TABLE`). Subtasks live in a proper `subtasks` table keyed by `task_uuid`. Both tables are still rewritten wholesale on save; uuid keeps parent identity stable across the rewrite.
+- **Expand/collapse** — no persistent set. The active/selected parent auto-expands to show its checklist; all others stay collapsed. Simplest model that satisfies "expand the selected task."
+- **Archive** — computed on the fly from `completion_date` (`done` for > 24h); no stored flag, so it self-updates every render/tick. Archived subtasks are hidden by default, revealed globally with `Shift+A`, never deleted.
+- **Parent completion** — `Enter` still toggles the parent independently of subtask state (no auto-complete / no warning). Kept the existing behaviour to avoid surprising the user.
+- **Dashboard counter** — left unchanged (counts parent tasks; subtask state does not affect it).
+- **Nav** — `selected_subtask: Option<usize>` under the active parent; `j`/`k` step in and out. `Space`/`x` toggles the highlighted subtask.
 
 ## Goal
 

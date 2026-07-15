@@ -62,8 +62,57 @@ impl Priority {
     }
 }
 
+/// Generate a fresh persistent identifier for a task. Used both by `Task::new`
+/// and as a serde default so legacy tasks loaded without a uuid get one.
+pub fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// A subtask has moved to the collapsed "archived" section once it has been
+/// `done` for longer than this.
+pub const SUBTASK_ARCHIVE_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct SubTask {
+    pub name: String,
+    #[serde(default)]
+    pub done: bool,
+    pub creation_date: DateTime<Utc>,
+    #[serde(default)]
+    pub completion_date: Option<DateTime<Utc>>,
+}
+
+impl SubTask {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            done: false,
+            creation_date: Utc::now(),
+            completion_date: None,
+        }
+    }
+
+    /// Flip done state, stamping/clearing the completion date accordingly.
+    pub fn toggle(&mut self) {
+        self.done = !self.done;
+        self.completion_date = if self.done { Some(Utc::now()) } else { None };
+    }
+
+    /// True once the subtask has been done for more than [`SUBTASK_ARCHIVE_AFTER`].
+    pub fn is_archived(&self, now: DateTime<Utc>) -> bool {
+        self.done
+            && self
+                .completion_date
+                .is_some_and(|c| now - c > SUBTASK_ARCHIVE_AFTER)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Task {
+    /// Stable identity that survives the wholesale rewrite in `save_tasks`,
+    /// so subtasks can be keyed to their parent.
+    #[serde(default = "new_uuid")]
+    pub uuid: String,
     pub name: String,
     #[serde(default)]
     pub notes: Option<String>,
@@ -78,11 +127,14 @@ pub struct Task {
     pub completed: bool,
     pub creation_date: DateTime<Utc>,
     pub completion_date: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub subtasks: Vec<SubTask>,
 }
 
 impl Task {
     pub fn new(name: String, project: Option<String>, priority: Priority) -> Self {
         Self {
+            uuid: new_uuid(),
             name,
             notes: None,
             project,
@@ -92,12 +144,40 @@ impl Task {
             completed: false,
             creation_date: Utc::now(),
             completion_date: None,
+            subtasks: Vec::new(),
         }
     }
 
     /// True when the task has a due date in the past and is not yet done.
     pub fn is_overdue(&self) -> bool {
         !self.completed && self.due_date.is_some_and(|d| d < Utc::now())
+    }
+
+    /// `(done, total)` over all subtasks, or `None` when the task has none.
+    pub fn subtask_progress(&self) -> Option<(usize, usize)> {
+        if self.subtasks.is_empty() {
+            return None;
+        }
+        let done = self.subtasks.iter().filter(|s| s.done).count();
+        Some((done, self.subtasks.len()))
+    }
+
+    /// Indices into `subtasks` in display order: active first, then archived
+    /// (only when `show_archived`). This is the mapping the UI navigates over.
+    pub fn visible_subtask_indices(&self, show_archived: bool, now: DateTime<Utc>) -> Vec<usize> {
+        let mut active = Vec::new();
+        let mut archived = Vec::new();
+        for (i, s) in self.subtasks.iter().enumerate() {
+            if s.is_archived(now) {
+                archived.push(i);
+            } else {
+                active.push(i);
+            }
+        }
+        if show_archived {
+            active.extend(archived);
+        }
+        active
     }
 }
 
@@ -145,6 +225,7 @@ pub enum InputMode {
     Filtering,
     EditingNotes,
     EditingDue,
+    EditingSubtask,
 }
 
 #[derive(Serialize, Deserialize)]

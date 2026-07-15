@@ -140,6 +140,7 @@ fn handle_key_event(key: KeyEvent, app: &mut App, ui: &mut UiState) {
         InputMode::Filtering => handle_filtering_input(key, ui),
         InputMode::EditingNotes => handle_editing_notes_input(key, app, ui),
         InputMode::EditingDue => handle_editing_due_input(key, app, ui),
+        InputMode::EditingSubtask => handle_editing_subtask_input(key, app, ui),
         InputMode::Normal => {
             if key.code == KeyCode::Char('o')
                 && key.modifiers == KeyModifiers::NONE
@@ -202,6 +203,11 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
                 app.current_view = View::Statistics;
             }
             KeyCode::Char('n') => ui.input_mode = InputMode::Editing,
+            KeyCode::Char('a') => ui.start_add_subtask(app),
+            KeyCode::Char(' ') | KeyCode::Char('x') => ui.toggle_selected_subtask(app),
+            KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
+                ui.show_archived = !ui.show_archived;
+            }
             KeyCode::Char('e') => ui.start_rename(app),
             KeyCode::Char('E') if key.modifiers == KeyModifiers::SHIFT => {
                 ui.start_edit_notes_active(app)
@@ -212,8 +218,14 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             KeyCode::Char('/') => ui.input_mode = InputMode::Filtering,
             KeyCode::Down | KeyCode::Char('j') => ui.next_active_task(app),
             KeyCode::Up | KeyCode::Char('k') => ui.previous_active_task(app),
-            KeyCode::Enter => app.complete_active_task(),
-            KeyCode::Char('d') | KeyCode::Delete => app.delete_active_task(),
+            KeyCode::Enter => {
+                ui.selected_subtask = None;
+                app.complete_active_task();
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                ui.selected_subtask = None;
+                app.delete_active_task();
+            }
             _ => {}
         },
     }
@@ -295,6 +307,18 @@ fn handle_editing_due_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             ui.due_error = false;
             ui.due_input.pop();
         }
+        _ => {}
+    }
+}
+
+fn handle_editing_subtask_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
+    match key.code {
+        KeyCode::Enter => ui.submit_subtask(app),
+        KeyCode::Char(c) => ui.subtask_input.push(c),
+        KeyCode::Backspace => {
+            ui.subtask_input.pop();
+        }
+        KeyCode::Esc => ui.cancel_subtask(),
         _ => {}
     }
 }

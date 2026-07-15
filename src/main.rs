@@ -174,6 +174,25 @@ fn handle_dashboard_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
 }
 
 fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
+    // The help overlay swallows every key; any press dismisses it.
+    if ui.show_help {
+        ui.show_help = false;
+        return;
+    }
+
+    // The delete confirmation intercepts input: only `y`/Enter destroys.
+    if ui.confirm_delete {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                ui.selected_subtask = None;
+                app.delete_active_task();
+            }
+            _ => {}
+        }
+        ui.confirm_delete = false;
+        return;
+    }
+
     match key {
         KeyEvent {
             code: KeyCode::Up,
@@ -202,13 +221,23 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
                 ui.previous_view = app.current_view;
                 app.current_view = View::Statistics;
             }
-            KeyCode::Char('n') => ui.input_mode = InputMode::Editing,
-            KeyCode::Char('a') => ui.start_add_subtask(app),
-            KeyCode::Char(' ') | KeyCode::Char('x') => ui.toggle_selected_subtask(app),
+            // `a`dd a top-level task; `+` adds a subtask under the active parent.
+            KeyCode::Char('a') => ui.input_mode = InputMode::Editing,
+            KeyCode::Char('+') => ui.start_add_subtask(app),
+            // Space/x is the checkbox: toggle the highlighted subtask if one is
+            // selected, otherwise toggle the parent task's done state.
+            KeyCode::Char(' ') | KeyCode::Char('x') => {
+                if ui.selected_subtask.is_some() {
+                    ui.toggle_selected_subtask(app);
+                } else {
+                    app.complete_active_task();
+                }
+            }
             KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
                 ui.show_archived = !ui.show_archived;
             }
-            KeyCode::Char('e') => ui.start_rename(app),
+            // Enter/e opens editing (rename for now; becomes the edit sheet in Phase 2).
+            KeyCode::Enter | KeyCode::Char('e') => ui.start_rename(app),
             KeyCode::Char('E') if key.modifiers == KeyModifiers::SHIFT => {
                 ui.start_edit_notes_active(app)
             }
@@ -218,14 +247,13 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             KeyCode::Char('/') => ui.input_mode = InputMode::Filtering,
             KeyCode::Down | KeyCode::Char('j') => ui.next_active_task(app),
             KeyCode::Up | KeyCode::Char('k') => ui.previous_active_task(app),
-            KeyCode::Enter => {
-                ui.selected_subtask = None;
-                app.complete_active_task();
-            }
+            // Never silent-destroy: arm a confirmation prompt instead.
             KeyCode::Char('d') | KeyCode::Delete => {
-                ui.selected_subtask = None;
-                app.delete_active_task();
+                if app.active_task_index.is_some() {
+                    ui.confirm_delete = true;
+                }
             }
+            KeyCode::Char('?') => ui.show_help = true,
             _ => {}
         },
     }

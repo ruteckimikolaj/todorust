@@ -77,6 +77,10 @@ pub struct UiState {
     pub editing_subtask_parent: Option<usize>,
     /// Reveal the collapsed archived section of the active parent's checklist.
     pub show_archived: bool,
+    /// When true, the `?` help overlay is drawn over the task list.
+    pub show_help: bool,
+    /// When true, a delete-confirmation prompt is drawn; `y` confirms.
+    pub confirm_delete: bool,
 }
 
 impl Default for UiState {
@@ -98,6 +102,8 @@ impl Default for UiState {
             subtask_input: String::new(),
             editing_subtask_parent: None,
             show_archived: false,
+            show_help: false,
+            confirm_delete: false,
         }
     }
 }

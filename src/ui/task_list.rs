@@ -221,10 +221,10 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
                     " [Enter] Submit | [Esc] Cancel "
                 }
                 _ => {
-                    if chunks[3].width > 80 {
-                        " [↑/↓] Nav | [n]ew | [a]dd sub | [Spc] toggle sub | [Shift+A] archived | [e]dit | [p]riority | [D]ue | [Shift+E] notes | [s]ort | [/] Filter | [Enter] Done | [d]el | [q]uit "
+                    if chunks[3].width > 70 {
+                        " [↑/↓] Nav | [a]dd | [+] sub | [Spc] done | [e]dit | [s]ort | [/] find | [d]el | [?] help | [q]uit "
                     } else {
-                        " [↑/↓][n][a][Spc][A][e][p][D][E][s][/][Ent][d][q] "
+                        " [↑↓][a][+][Spc][e][s][/][d][?][q] "
                     }
                 }
             };
@@ -242,4 +242,110 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
             );
         }
     }
+
+    // Overlays draw last so they sit on top of the list.
+    if ui.confirm_delete {
+        draw_confirm_delete(frame, app, theme);
+    }
+    if ui.show_help {
+        draw_help_overlay(frame, theme);
+    }
+}
+
+/// A rectangle centered in `area`, sized to `width`×`height` (clamped to fit).
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+/// Confirmation prompt shown before a destructive delete.
+fn draw_confirm_delete(frame: &mut Frame, app: &App, theme: &Theme) {
+    let name = app
+        .active_task_index
+        .and_then(|i| app.tasks.get(i))
+        .map(|t| t.name.clone())
+        .unwrap_or_default();
+    let area = centered_rect(50, 5, frame.area());
+    frame.render_widget(Clear, area);
+    let text = Text::from(vec![
+        Line::from(Span::styled(
+            format!("Delete \"{}\"?", name),
+            Style::default().fg(theme.base_fg).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[y] delete    [n/Esc] cancel",
+            Style::default().fg(theme.help_text_fg),
+        )),
+    ]);
+    frame.render_widget(
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" Confirm ")
+                    .style(Style::default().fg(theme.high_color).bg(theme.base_bg)),
+            ),
+        area,
+    );
+}
+
+/// Full keybinding reference — the home for every key kept off the short bar.
+fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
+    let rows = [
+        ("↑/↓  j/k", "Move selection"),
+        ("a", "Add task"),
+        ("+", "Add subtask"),
+        ("Space / x", "Toggle done (task or selected subtask)"),
+        ("Enter / e", "Edit task (rename)"),
+        ("p", "Cycle priority"),
+        ("Shift+D", "Set due date"),
+        ("Shift+E", "Edit notes"),
+        ("s", "Cycle sort mode"),
+        ("K / J", "Reorder task (Manual sort)"),
+        ("Shift+A", "Toggle archived subtasks"),
+        ("/", "Filter / search"),
+        ("d / Del", "Delete (with confirm)"),
+        ("o", "Settings"),
+        ("Tab", "Switch view"),
+        ("q", "Quit"),
+    ];
+    let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
+    for (keys, desc) in rows {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:<11}", keys),
+                Style::default()
+                    .fg(theme.accent_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(desc.to_string(), Style::default().fg(theme.base_fg)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Press any key to close",
+        Style::default()
+            .fg(theme.help_text_fg)
+            .add_modifier(Modifier::ITALIC),
+    )));
+
+    let area = centered_rect(52, lines.len() as u16 + 2, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Keybindings ")
+                .title_alignment(Alignment::Center)
+                .style(Style::default().fg(theme.base_fg).bg(theme.base_bg)),
+        ),
+        area,
+    );
 }

@@ -304,7 +304,7 @@ impl UiState {
     /// Move selection down. Steps into the active parent's subtasks, then on
     /// to the next parent once past the last subtask.
     pub fn next_active_task(&mut self, app: &mut App) {
-        let indices = app.ordered_active_indices(&self.filter_input.to_lowercase());
+        let indices = app.active_display_order(&self.filter_input.to_lowercase());
         if indices.is_empty() {
             app.active_task_index = None;
             self.selected_subtask = None;
@@ -340,7 +340,7 @@ impl UiState {
     /// Move selection up. Steps back out of subtasks to the parent row, then on
     /// to the previous parent.
     pub fn previous_active_task(&mut self, app: &mut App) {
-        let indices = app.ordered_active_indices(&self.filter_input.to_lowercase());
+        let indices = app.active_display_order(&self.filter_input.to_lowercase());
         if indices.is_empty() {
             app.active_task_index = None;
             self.selected_subtask = None;
@@ -558,7 +558,8 @@ mod tests {
         p0.subtasks.push(SubTask::new("s0".into()));
         p0.subtasks.push(SubTask::new("s1".into()));
         app.tasks.push(p0);
-        app.tasks.push(Task::new("p1".into(), None, Priority::Medium));
+        app.tasks
+            .push(Task::new("p1".into(), None, Priority::Medium));
         app.active_task_index = Some(0);
         app
     }
@@ -568,13 +569,25 @@ mod tests {
         let mut app = app_with_two();
         let mut ui = UiState::default();
         // parent 0 selected, no subtask
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), None));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(0), None)
+        );
         ui.next_active_task(&mut app); // -> s0
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), Some(0)));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(0), Some(0))
+        );
         ui.next_active_task(&mut app); // -> s1
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), Some(1)));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(0), Some(1))
+        );
         ui.next_active_task(&mut app); // past last -> parent 1
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(1), None));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(1), None)
+        );
     }
 
     #[test]
@@ -583,18 +596,26 @@ mod tests {
         let mut ui = UiState::default();
         ui.selected_subtask = Some(1); // on s1 of parent 0
         ui.previous_active_task(&mut app); // -> s0
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), Some(0)));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(0), Some(0))
+        );
         ui.previous_active_task(&mut app); // -> parent row
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(0), None));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(0), None)
+        );
         ui.previous_active_task(&mut app); // wrap to parent 1
-        assert_eq!((app.active_task_index, ui.selected_subtask), (Some(1), None));
+        assert_eq!(
+            (app.active_task_index, ui.selected_subtask),
+            (Some(1), None)
+        );
     }
 
     #[test]
     fn edit_sheet_writes_all_fields_back() {
         let mut app = App::default();
-        app.tasks
-            .push(Task::new("old".into(), None, Priority::Low));
+        app.tasks.push(Task::new("old".into(), None, Priority::Low));
         app.active_task_index = Some(0);
         let mut ui = UiState::default();
         ui.open_edit_sheet(&app);

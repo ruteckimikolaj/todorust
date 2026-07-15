@@ -23,8 +23,8 @@ use app::ui_state::SheetField;
 use app::{App, InputMode, Priority, UiState, View};
 use settings::{Settings, Theme};
 use ui::{
-    draw_dashboard, draw_edit_sheet, draw_notes_modal, draw_settings, draw_statistics,
-    draw_task_details, draw_task_list,
+    draw_edit_sheet, draw_notes_modal, draw_settings, draw_statistics, draw_task_details,
+    draw_task_list,
 };
 
 /// A minimalist, powerful to-do manager for your terminal.
@@ -153,24 +153,12 @@ fn handle_key_event(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             }
 
             match app.current_view {
-                View::Dashboard => handle_dashboard_input(key, app, ui),
                 View::TaskList => handle_tasklist_input(key, app, ui),
                 View::Statistics => handle_stats_input(key, app, ui),
                 View::Settings => handle_settings_input(key, app, ui),
                 View::TaskDetails => handle_task_details_input(key, app, ui),
             }
         }
-    }
-}
-
-fn handle_dashboard_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
-    match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Tab => {
-            ui.previous_view = app.current_view;
-            app.current_view = View::TaskList;
-        }
-        _ => {}
     }
 }
 
@@ -243,7 +231,7 @@ fn handle_tasklist_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
             KeyCode::Char('1') => app.set_active_priority(Priority::Low),
             KeyCode::Char('2') => app.set_active_priority(Priority::Medium),
             KeyCode::Char('3') => app.set_active_priority(Priority::High),
-            KeyCode::Char('s') => app.cycle_sort_mode(),
+            KeyCode::Char('s') | KeyCode::Char('g') => app.cycle_grouping_mode(),
             KeyCode::Char('/') => ui.input_mode = InputMode::Filtering,
             KeyCode::Down | KeyCode::Char('j') => ui.next_active_task(app),
             KeyCode::Up | KeyCode::Char('k') => ui.previous_active_task(app),
@@ -264,7 +252,7 @@ fn handle_stats_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Tab => {
             ui.previous_view = app.current_view;
-            app.current_view = View::Dashboard;
+            app.current_view = View::TaskList;
         }
         KeyCode::Char('/') => ui.input_mode = InputMode::Filtering,
         KeyCode::Down | KeyCode::Char('j') => ui.next_completed_task(app),
@@ -431,7 +419,6 @@ fn handle_editing_input(key: KeyEvent, app: &mut App, ui: &mut UiState) {
 fn ui(frame: &mut Frame, app: &App, ui_state: &UiState) {
     let theme = Theme::from_settings(app.settings.theme, app.settings.custom_theme.as_ref());
     match app.current_view {
-        View::Dashboard => draw_dashboard(frame, app, &theme),
         View::TaskList => draw_task_list(frame, app, ui_state, &theme),
         View::Statistics => draw_statistics(frame, app, ui_state, &theme),
         View::Settings => draw_settings(frame, app, ui_state, &theme),

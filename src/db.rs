@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::app::{new_uuid, App, Priority, SortMode, SubTask, Task, View};
+use crate::app::{new_uuid, App, GroupingMode, Priority, SubTask, Task, View};
 
 pub fn open_and_init(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -76,7 +76,7 @@ fn priority_to_int(p: Priority) -> i64 {
 pub struct LoadedState {
     pub tasks: Vec<Task>,
     pub current_view: View,
-    pub sort_mode: SortMode,
+    pub grouping_mode: GroupingMode,
     pub active_task_index: Option<usize>,
 }
 
@@ -84,16 +84,29 @@ pub fn load_from(conn: &Connection) -> LoadedState {
     let tasks = load_tasks(conn).unwrap_or_default();
     let current_view = get_state(conn, "current_view")
         .map(|s| match s.as_str() {
-            "Dashboard" => View::Dashboard,
             "Statistics" => View::Statistics,
+            // "Dashboard" is a legacy value (Phase 3 merged it into TaskList).
             _ => View::TaskList,
         })
         .unwrap_or_default();
-    let sort_mode = get_state(conn, "sort_mode")
-        .map(|s| match s.as_str() {
-            "Priority" => SortMode::Priority,
-            "DueDate" => SortMode::DueDate,
-            _ => SortMode::Manual,
+    // Prefer the new `grouping_mode` key; fall back to the legacy `sort_mode`
+    // written by pre-Phase-3 builds so upgrades are lossless.
+    let grouping_mode = get_state(conn, "grouping_mode")
+        .and_then(|s| match s.as_str() {
+            "Smart" => Some(GroupingMode::Smart),
+            "Project" => Some(GroupingMode::Project),
+            "Priority" => Some(GroupingMode::Priority),
+            "Manual" => Some(GroupingMode::Manual),
+            _ => None,
+        })
+        .or_else(|| {
+            get_state(conn, "sort_mode").map(|s| match s.as_str() {
+                "Priority" => GroupingMode::Priority,
+                // Legacy "DueDate" mapped to Smart, which sorts dated tasks by due date.
+                "DueDate" => GroupingMode::Smart,
+                "Manual" => GroupingMode::Manual,
+                _ => GroupingMode::Smart,
+            })
         })
         .unwrap_or_default();
     let active_task_index = get_state(conn, "active_task_index")
@@ -102,7 +115,7 @@ pub fn load_from(conn: &Connection) -> LoadedState {
     LoadedState {
         tasks,
         current_view,
-        sort_mode,
+        grouping_mode,
         active_task_index,
     }
 }
@@ -227,7 +240,6 @@ fn save_subtasks(conn: &Connection, tasks: &[Task]) -> Result<()> {
 
 fn save_app_state(conn: &Connection, app: &App) -> Result<()> {
     let view_str = match app.current_view {
-        View::Dashboard => "Dashboard",
         View::TaskList => "TaskList",
         View::Statistics => "Statistics",
         View::Settings => "Settings",
@@ -237,15 +249,18 @@ fn save_app_state(conn: &Connection, app: &App) -> Result<()> {
         "INSERT OR REPLACE INTO app_state (key, value) VALUES ('current_view', ?1)",
         params![view_str],
     )?;
-    let sort_str = match app.sort_mode {
-        SortMode::Manual => "Manual",
-        SortMode::Priority => "Priority",
-        SortMode::DueDate => "DueDate",
+    let grouping_str = match app.grouping_mode {
+        GroupingMode::Smart => "Smart",
+        GroupingMode::Project => "Project",
+        GroupingMode::Priority => "Priority",
+        GroupingMode::Manual => "Manual",
     };
     conn.execute(
-        "INSERT OR REPLACE INTO app_state (key, value) VALUES ('sort_mode', ?1)",
-        params![sort_str],
+        "INSERT OR REPLACE INTO app_state (key, value) VALUES ('grouping_mode', ?1)",
+        params![grouping_str],
     )?;
+    // Purge the legacy `sort_mode` row so it can't shadow future reads.
+    conn.execute("DELETE FROM app_state WHERE key = 'sort_mode'", [])?;
     match app.active_task_index {
         Some(idx) => {
             conn.execute(

@@ -170,9 +170,14 @@ Touch: `src/main.rs` (routing), `src/ui/task_list.rs` (bar + help overlay), `src
 **Phase 2 — Task edit sheet (§3.4).** One modal to edit all attributes; retire `e`/`p`/`Shift+D`/
 `Shift+E` as standalone keys. Touch: new `src/ui/edit_sheet.rs`, `ui_state`, `main`.
 
-**Phase 3 — Grouped agenda + Today home (§3.1, §3.2).** Section grouping with `g`, merge Dashboard
-into a Today view. Introduce a flattened render-row model (also unblocks subtasks). Touch:
-`src/app/mod.rs` (grouping), `src/ui/task_list.rs`, `src/ui/dashboard.rs`.
+**Phase 3 — Grouped agenda + Today home (§3.1, §3.2). ✅ DONE.** Section grouping cycled with
+`g` (Smart / Project / Priority / Manual); Task List renders section headers with counts and
+walks the flattened section order for both display and cursor navigation. Dashboard is merged
+into the Task List as a compact top-of-view "Today" strip (date + overdue/today/done-today/open),
+and `Tab` now toggles Task List ↔ Statistics only. `sort_mode` field replaced by `grouping_mode`;
+DB reads the legacy key for lossless upgrades. Touched: `src/app/mod.rs` (grouping model),
+`src/ui/task_list.rs` (headers + strip), `src/main.rs` (routing + `g` key), `src/db.rs`
+(migration), `src/ui/dashboard.rs` (removed).
 
 **Phase 4 — Quick-add parsing + reschedule presets (§4.1, §4.2).** Natural-language capture and
 `t`/`T`/`w`/`r`. Touch: `src/app/ui_state.rs` (parser), `main`.

@@ -1,7 +1,7 @@
 use chrono::{Local, Utc};
 use ratatui::{prelude::*, widgets::*};
 
-use crate::app::{App, InputMode, Priority, Task, UiState};
+use crate::app::{App, InputMode, Priority, SectionTone, Task, UiState};
 use crate::settings::Theme;
 
 fn priority_color(p: Priority, theme: &Theme) -> Color {
@@ -9,6 +9,16 @@ fn priority_color(p: Priority, theme: &Theme) -> Color {
         Priority::Low => theme.low_color,
         Priority::Medium => theme.medium_color,
         Priority::High => theme.high_color,
+    }
+}
+
+fn section_color(tone: SectionTone, theme: &Theme) -> Color {
+    match tone {
+        SectionTone::Overdue | SectionTone::High => theme.high_color,
+        SectionTone::Today | SectionTone::Medium => theme.medium_color,
+        SectionTone::Upcoming => theme.accent_color,
+        SectionTone::Low => theme.low_color,
+        SectionTone::NoDate | SectionTone::Neutral => theme.help_text_fg,
     }
 }
 
@@ -33,6 +43,79 @@ fn due_badge(task: &Task, theme: &Theme) -> Option<(String, Color)> {
     }
 }
 
+/// Compact one-line agenda strip shown above the task list (Phase 3 home view).
+fn draw_today_strip(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let today = Local::now().date_naive();
+    let open = app.tasks.iter().filter(|t| !t.completed).count();
+    let overdue = app.tasks.iter().filter(|t| t.is_overdue()).count();
+    let due_today = app
+        .tasks
+        .iter()
+        .filter(|t| {
+            !t.completed
+                && t.due_date
+                    .is_some_and(|d| d.with_timezone(&Local).date_naive() == today)
+        })
+        .count();
+    let done_today = app
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.completion_date
+                .is_some_and(|d| d.with_timezone(&Local).date_naive() == today)
+        })
+        .count();
+
+    let date_str = Local::now().format("%A, %-d %B %Y").to_string();
+    let overdue_style = if overdue > 0 {
+        Style::default()
+            .fg(theme.high_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.help_text_fg)
+    };
+
+    let spans = vec![
+        Span::styled(
+            format!(" {} ", date_str),
+            Style::default()
+                .fg(theme.accent_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("│ ", Style::default().fg(theme.help_text_fg)),
+        Span::styled(format!("⚠ Overdue {}", overdue), overdue_style),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("● Today {}", due_today),
+            Style::default().fg(theme.medium_color),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("✓ Done today {}", done_today),
+            Style::default().fg(theme.done_color),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("◦ Open {}", open),
+            Style::default().fg(theme.help_text_fg),
+        ),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" ✓ TODAY ")
+                    .title_alignment(Alignment::Center)
+                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg)),
+            ),
+        area,
+    );
+}
+
 pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -44,110 +127,138 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
         ])
         .split(frame.area());
 
-    frame.render_widget(
-        Block::default()
-            .title(" ✓ TASKS ")
-            .title_alignment(Alignment::Center)
-            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg)),
-        chunks[0],
-    );
+    draw_today_strip(frame, chunks[0], app, theme);
 
     let filter = ui.filter_input.to_lowercase();
-    let active_indices = app.ordered_active_indices(&filter);
+    let sections = app.grouped_active_sections(&filter);
 
-    let mut list_title = format!("Active Tasks — sort: {}", app.sort_mode.title());
+    let mut list_title = format!("Active Tasks — group: {}", app.grouping_mode.title());
     if !ui.filter_input.is_empty() {
         list_title.push_str(&format!(" [/{}]", ui.filter_input));
     }
 
-    // Flattened render model: each parent, and — for the active parent — its
-    // visible subtask rows (active checklist, then an archived section on demand).
+    // Flattened render model: for each section, an optional header row plus
+    // its task rows. Expanded parents inline their visible subtask rows.
     let now = Utc::now();
-    let mut active_list_items: Vec<ListItem> = Vec::new();
+    let mut list_items: Vec<ListItem> = Vec::new();
     let mut selected_pos: Option<usize> = None;
-    for &i in &active_indices {
-        let task = &app.tasks[i];
-        let is_active = Some(i) == app.active_task_index;
-        let marker = if is_active { "▶ " } else { "  " };
 
-        if is_active && ui.selected_subtask.is_none() {
-            selected_pos = Some(active_list_items.len());
+    for section in &sections {
+        // Only render a header when the section is labeled (Manual has none).
+        if !section.label.is_empty() {
+            let header_color = section_color(section.tone, theme);
+            list_items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {}  ", section.label),
+                    Style::default()
+                        .fg(header_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({})", section.indices.len()),
+                    Style::default().fg(theme.help_text_fg),
+                ),
+            ])));
         }
 
-        let mut spans = vec![
-            Span::styled(
-                format!("{}[ ] ", marker),
-                Style::default().fg(theme.base_fg),
-            ),
-            Span::styled(
-                format!("{} ", task.priority.glyph()),
-                Style::default()
-                    .fg(priority_color(task.priority, theme))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(task.name.clone(), Style::default().fg(theme.base_fg)),
-        ];
-        if let Some(proj) = &task.project {
-            spans.push(Span::styled(
-                format!(" @{}", proj),
-                Style::default().fg(theme.accent_color),
-            ));
-        }
-        if let Some((done, total)) = task.subtask_progress() {
-            let color = if done == total {
-                theme.low_color
-            } else {
-                theme.accent_color
-            };
-            spans.push(Span::styled(
-                format!("  [{}/{}]", done, total),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ));
-        }
-        if let Some((badge, color)) = due_badge(task, theme) {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(badge, Style::default().fg(color)));
-        }
-        active_list_items.push(ListItem::new(Line::from(spans)));
+        for &i in &section.indices {
+            let task = &app.tasks[i];
+            let is_active = Some(i) == app.active_task_index;
+            let marker = if is_active { "▶ " } else { "  " };
 
-        if is_active {
-            let vis = task.visible_subtask_indices(ui.show_archived, now);
-            let mut archived_header = false;
-            for (row_idx, &si) in vis.iter().enumerate() {
-                let sub = &task.subtasks[si];
-                let archived = sub.is_archived(now);
-                if archived && !archived_header {
-                    active_list_items.push(ListItem::new(Line::from(Span::styled(
-                        "      ─ archived ─",
-                        Style::default()
+            if is_active && ui.selected_subtask.is_none() {
+                selected_pos = Some(list_items.len());
+            }
+
+            let mut spans = vec![
+                Span::styled(
+                    format!("{}[ ] ", marker),
+                    Style::default().fg(theme.base_fg),
+                ),
+                Span::styled(
+                    format!("{} ", task.priority.glyph()),
+                    Style::default()
+                        .fg(priority_color(task.priority, theme))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(task.name.clone(), Style::default().fg(theme.base_fg)),
+            ];
+            if let Some(proj) = &task.project {
+                spans.push(Span::styled(
+                    format!(" @{}", proj),
+                    Style::default().fg(theme.accent_color),
+                ));
+            }
+            if let Some((done, total)) = task.subtask_progress() {
+                let color = if done == total {
+                    theme.low_color
+                } else {
+                    theme.accent_color
+                };
+                spans.push(Span::styled(
+                    format!("  [{}/{}]", done, total),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if let Some((badge, color)) = due_badge(task, theme) {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(badge, Style::default().fg(color)));
+            }
+            list_items.push(ListItem::new(Line::from(spans)));
+
+            if is_active {
+                let vis = task.visible_subtask_indices(ui.show_archived, now);
+                let mut archived_header = false;
+                for (row_idx, &si) in vis.iter().enumerate() {
+                    let sub = &task.subtasks[si];
+                    let archived = sub.is_archived(now);
+                    if archived && !archived_header {
+                        list_items.push(ListItem::new(Line::from(Span::styled(
+                            "      ─ archived ─",
+                            Style::default()
+                                .fg(theme.help_text_fg)
+                                .add_modifier(Modifier::ITALIC),
+                        ))));
+                        archived_header = true;
+                    }
+                    if ui.selected_subtask == Some(row_idx) {
+                        selected_pos = Some(list_items.len());
+                    }
+                    let checkbox = if sub.done { "[x] " } else { "[ ] " };
+                    let mut style = Style::default().fg(theme.base_fg);
+                    if sub.done {
+                        style = Style::default()
                             .fg(theme.help_text_fg)
-                            .add_modifier(Modifier::ITALIC),
-                    ))));
-                    archived_header = true;
+                            .add_modifier(Modifier::CROSSED_OUT);
+                    }
+                    list_items.push(ListItem::new(Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(checkbox, Style::default().fg(theme.accent_color)),
+                        Span::styled(sub.name.clone(), style),
+                    ])));
                 }
-                if ui.selected_subtask == Some(row_idx) {
-                    selected_pos = Some(active_list_items.len());
-                }
-                let checkbox = if sub.done { "[x] " } else { "[ ] " };
-                let mut style = Style::default().fg(theme.base_fg);
-                if sub.done {
-                    style = Style::default()
-                        .fg(theme.help_text_fg)
-                        .add_modifier(Modifier::CROSSED_OUT);
-                }
-                active_list_items.push(ListItem::new(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(checkbox, Style::default().fg(theme.accent_color)),
-                    Span::styled(sub.name.clone(), style),
-                ])));
             }
         }
+    }
+
+    if list_items.is_empty() {
+        let msg = if ui.filter_input.is_empty() {
+            "All clear ✓  Press [a] to add your first task."
+        } else {
+            "No matching tasks."
+        };
+        list_items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default()
+                .fg(theme.help_text_fg)
+                .add_modifier(Modifier::ITALIC),
+        ))));
     }
 
     let mut list_state = ListState::default();
     list_state.select(selected_pos);
 
-    let active_list = List::new(active_list_items)
+    let active_list = List::new(list_items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -164,7 +275,10 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
     frame.render_stateful_widget(active_list, chunks[1], &mut list_state);
 
     let editing_sub = matches!(ui.input_mode, InputMode::EditingSubtask);
-    let input_active = matches!(ui.input_mode, InputMode::Editing | InputMode::EditingSubtask);
+    let input_active = matches!(
+        ui.input_mode,
+        InputMode::Editing | InputMode::EditingSubtask
+    );
     let input_value = if editing_sub {
         ui.subtask_input.as_str()
     } else {
@@ -217,14 +331,12 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
         }
         _ => {
             let help_text = match ui.input_mode {
-                InputMode::Editing | InputMode::EditingSubtask => {
-                    " [Enter] Submit | [Esc] Cancel "
-                }
+                InputMode::Editing | InputMode::EditingSubtask => " [Enter] Submit | [Esc] Cancel ",
                 _ => {
                     if chunks[3].width > 70 {
-                        " [↑/↓] Nav | [a]dd | [+] sub | [Spc] done | [e]dit | [s]ort | [/] find | [d]el | [?] help | [q]uit "
+                        " [↑/↓] Nav | [a]dd | [+] sub | [Spc] done | [e]dit | [g]roup | [/] find | [d]el | [?] help | [q]uit "
                     } else {
-                        " [↑↓][a][+][Spc][e][s][/][d][?][q] "
+                        " [↑↓][a][+][Spc][e][g][/][d][?][q] "
                     }
                 }
             };
@@ -273,7 +385,9 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App, theme: &Theme) {
     let text = Text::from(vec![
         Line::from(Span::styled(
             format!("Delete \"{}\"?", name),
-            Style::default().fg(theme.base_fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.base_fg)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -282,15 +396,13 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App, theme: &Theme) {
         )),
     ]);
     frame.render_widget(
-        Paragraph::new(text)
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(" Confirm ")
-                    .style(Style::default().fg(theme.high_color).bg(theme.base_bg)),
-            ),
+        Paragraph::new(text).alignment(Alignment::Center).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Confirm ")
+                .style(Style::default().fg(theme.high_color).bg(theme.base_bg)),
+        ),
         area,
     );
 }
@@ -304,7 +416,7 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
         ("Space / x", "Toggle done (task or selected subtask)"),
         ("Enter / e", "Edit sheet — name/project/priority/due/notes"),
         ("1 / 2 / 3", "Set priority Low/Med/High"),
-        ("s", "Cycle sort mode"),
+        ("g", "Cycle grouping (Smart/Project/Priority/Manual)"),
         ("K / J", "Reorder task (Manual sort)"),
         ("Shift+A", "Toggle archived subtasks"),
         ("/", "Filter / search"),

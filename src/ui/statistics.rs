@@ -304,7 +304,7 @@ pub fn draw_statistics(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme
     }
 
     let help_text = if chunks[help_idx].width > 80 {
-        " [Tab] Dashboard | [↑/↓] Navigate | [/] Filter | [Enter] Details | [d]elete | [q]uit "
+        " [Tab] Tasks | [↑/↓] Navigate | [/] Filter | [Enter] Details | [d]elete | [q]uit "
     } else {
         " [Tab] [↑/↓] [/] [Ent] [d] [q] "
     };

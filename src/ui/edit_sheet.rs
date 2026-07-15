@@ -71,7 +71,10 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
     let project_display = if sheet.project.is_empty() {
         Span::styled("(none)", Style::default().fg(theme.help_text_fg))
     } else {
-        Span::styled(format!("@{}", sheet.project.trim_start_matches('@')), Style::default().fg(theme.accent_color))
+        Span::styled(
+            format!("@{}", sheet.project.trim_start_matches('@')),
+            Style::default().fg(theme.accent_color),
+        )
     };
     frame.render_widget(
         Paragraph::new(field_line(
@@ -85,7 +88,11 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
 
     // Priority radio
     let radio = |label: &str, p: Priority| {
-        let dot = if sheet.priority == p { "(•) " } else { "( ) " };
+        let dot = if sheet.priority == p {
+            "(•) "
+        } else {
+            "( ) "
+        };
         let color = match p {
             Priority::Low => theme.low_color,
             Priority::Medium => theme.medium_color,

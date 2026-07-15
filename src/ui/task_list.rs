@@ -172,16 +172,14 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
             }
 
             let mut spans = vec![
+                Span::styled(marker, Style::default().fg(theme.base_fg)),
                 Span::styled(
-                    format!("{}[ ] ", marker),
-                    Style::default().fg(theme.base_fg),
-                ),
-                Span::styled(
-                    format!("{} ", task.priority.glyph()),
+                    "▍",
                     Style::default()
                         .fg(priority_color(task.priority, theme))
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(" [ ] ", Style::default().fg(theme.base_fg)),
                 Span::styled(task.name.clone(), Style::default().fg(theme.base_fg)),
             ];
             if let Some(proj) = &task.project {

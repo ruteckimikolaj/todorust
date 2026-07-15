@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::app::{new_uuid, App, GroupingMode, Priority, SubTask, Task, View};
+use crate::app::{new_uuid, parse_recurrence, App, GroupingMode, Priority, SubTask, Task, View};
 
 pub fn open_and_init(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -26,7 +26,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             due_notified    INTEGER NOT NULL DEFAULT 0,
             completed       INTEGER NOT NULL DEFAULT 0,
             creation_date   TEXT NOT NULL,
-            completion_date TEXT
+            completion_date TEXT,
+            recurrence      TEXT
         );
         CREATE TABLE IF NOT EXISTS subtasks (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +46,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // Migrate databases created before the uuid column existed. Ignore the
     // error raised when the column is already present.
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN uuid TEXT", []);
+    // Phase 5: recurrence column. Additive migration for pre-Phase-5 databases.
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT", []);
     Ok(())
 }
 
@@ -123,7 +126,7 @@ pub fn load_from(conn: &Connection) -> LoadedState {
 fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
     let mut subtasks_by_uuid = load_subtasks(conn).unwrap_or_default();
     let mut stmt = conn.prepare(
-        "SELECT name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date, uuid
+        "SELECT name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date, uuid, recurrence
          FROM tasks ORDER BY sort_order ASC",
     )?;
     let tasks = stmt
@@ -137,6 +140,10 @@ fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
                 .get::<_, Option<String>>(9)?
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(new_uuid);
+            let recurrence = row
+                .get::<_, Option<String>>(10)?
+                .as_deref()
+                .and_then(parse_recurrence);
             let subtasks = subtasks_by_uuid.remove(&uuid).unwrap_or_default();
             Ok(Task {
                 uuid,
@@ -152,6 +159,7 @@ fn load_tasks(conn: &Connection) -> Result<Vec<Task>> {
                     .unwrap_or_else(|_| Utc::now()),
                 completion_date: completion_str.and_then(|s| s.parse::<DateTime<Utc>>().ok()),
                 subtasks,
+                recurrence,
             })
         })?
         .filter_map(|r| r.ok())
@@ -197,8 +205,8 @@ fn save_tasks(conn: &Connection, tasks: &[Task]) -> Result<()> {
     conn.execute("DELETE FROM tasks", [])?;
     for (i, task) in tasks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO tasks (sort_order, uuid, name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO tasks (sort_order, uuid, name, notes, project, priority, due_date, due_notified, completed, creation_date, completion_date, recurrence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 i as i64,
                 task.uuid,
@@ -211,6 +219,7 @@ fn save_tasks(conn: &Connection, tasks: &[Task]) -> Result<()> {
                 task.completed as i64,
                 task.creation_date.to_rfc3339(),
                 task.completion_date.map(|d| d.to_rfc3339()),
+                task.recurrence.as_ref().map(|r| r.to_shortcut()),
             ],
         )?;
     }
@@ -365,5 +374,73 @@ mod tests {
         assert!(s.is_archived(Utc::now()), ">24h done → archived");
         s.completion_date = Some(Utc::now() - chrono::Duration::hours(1));
         assert!(!s.is_archived(Utc::now()), "recent done → active");
+    }
+
+    #[test]
+    fn recurrence_round_trip() {
+        use crate::app::Recurrence;
+        let dir = std::env::temp_dir().join(format!("todorust_test_rec_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rec.db");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = App::default();
+        let mut t = Task::new("water".into(), None, Priority::Medium);
+        t.recurrence = Some(Recurrence::EveryWeeks(2));
+        app.tasks.push(t);
+        let mut t2 = Task::new("mon standup".into(), None, Priority::Low);
+        t2.recurrence = Some(Recurrence::Weekly(chrono::Weekday::Mon));
+        app.tasks.push(t2);
+
+        let mut conn = open_and_init(&path).unwrap();
+        save_to(&mut conn, &app).unwrap();
+        let loaded = load_from(&conn);
+        assert_eq!(loaded.tasks.len(), 2);
+        assert_eq!(loaded.tasks[0].recurrence, Some(Recurrence::EveryWeeks(2)));
+        assert_eq!(
+            loaded.tasks[1].recurrence,
+            Some(Recurrence::Weekly(chrono::Weekday::Mon))
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_db_without_recurrence_migrates() {
+        let dir = std::env::temp_dir().join(format!("todorust_test_lr_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy_rec.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Simulate a pre-Phase-5 schema: uuid present, but no recurrence column.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    uuid TEXT,
+                    name TEXT NOT NULL,
+                    notes TEXT, project TEXT,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    due_date TEXT, due_notified INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    creation_date TEXT NOT NULL, completion_date TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (sort_order, uuid, name, priority, completed, creation_date)
+                 VALUES (0, 'u1', 'legacy', 1, 0, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+        let conn = open_and_init(&path).unwrap();
+        let loaded = load_from(&conn);
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].recurrence, None);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

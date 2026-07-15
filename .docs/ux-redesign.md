@@ -190,8 +190,17 @@ when it wasn't a placeholder. Touched: `src/app/ui_state.rs` (parsers +
 reschedule helpers), `src/app/mod.rs` (`InputMode::Rescheduling`, `App::set_active_due`),
 `src/main.rs` (`t`/`T`/`w`/`r` routing), `src/ui/task_list.rs` (preview + prompt).
 
-**Phase 5 — Recurring tasks + subtasks (§4.3, §4.5).** Data-model + generation logic; subtasks
-per `.docs/task.md`.
+**Phase 5 — Recurring tasks + subtasks (§4.3, §4.5). ✅ DONE.** Subtasks landed pre-Phase-5
+(commit `7b0852f`). Recurring tasks: new `Recurrence` enum (`EveryDays(n)` / `EveryWeeks(n)` /
+`EveryMonths(n)` / `Weekly(weekday)`) with `to_shortcut` / `title` / `next_after` methods.
+Optional `recurrence` on `Task`; completing a recurring task spawns the next occurrence in
+place via `App::spawn_next_occurrence` (subtask `done` flags reset, fresh uuid, cursor lands
+on the new instance). Quick-add gains a `%` token (`%daily`, `%2w`, `%mon`, …); the edit
+sheet grows a *Repeat* row (Tab into it, empty clears). `↻` glyph rendered next to recurring
+tasks in the list. DB schema adds `recurrence TEXT` via additive ALTER migration; round-trip
+covered by tests. Touches `src/app/mod.rs`, `src/app/ui_state.rs` (`parse_recurrence`,
+`ParsedQuickAdd.recurrence`, `SheetField::Recurrence`), `src/db.rs`, `src/ui/edit_sheet.rs`,
+`src/ui/task_list.rs`.
 
 **Phase 6 — Polish.** Review stats, mouse, bulk actions, import/export, priority gutter.
 

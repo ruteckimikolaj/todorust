@@ -1,6 +1,6 @@
 use crate::app::ui_state::task_matches_filter;
 use crate::settings::Settings;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike, Local, Utc};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 pub mod ui_state;
-pub use ui_state::UiState;
+pub use ui_state::{parse_recurrence, UiState};
 
 fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("", "", "todorust")
@@ -108,6 +108,78 @@ impl SubTask {
     }
 }
 
+/// Repeat schedule for a recurring task. The next due date after completion
+/// is derived by [`Recurrence::next_after`].
+///
+/// - `EveryDays(n)` / `EveryWeeks(n)` / `EveryMonths(n)` advance by that many
+///   days/weeks/months from the previous due date (or `now` when there is none).
+/// - `Weekly(weekday)` snaps to the coming occurrence of that weekday.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum Recurrence {
+    EveryDays(u32),
+    EveryWeeks(u32),
+    EveryMonths(u32),
+    Weekly(chrono::Weekday),
+}
+
+impl Recurrence {
+    /// Serialize as a compact shortcut (`"2d"`, `"1w"`, `"3m"`, `"mon"`),
+    /// which is also the form parsed by `parse_recurrence` and stored in the
+    /// SQLite `recurrence` column.
+    pub fn to_shortcut(self) -> String {
+        match self {
+            Recurrence::EveryDays(n) => format!("{}d", n),
+            Recurrence::EveryWeeks(n) => format!("{}w", n),
+            Recurrence::EveryMonths(n) => format!("{}m", n),
+            Recurrence::Weekly(wd) => match wd {
+                chrono::Weekday::Mon => "mon".into(),
+                chrono::Weekday::Tue => "tue".into(),
+                chrono::Weekday::Wed => "wed".into(),
+                chrono::Weekday::Thu => "thu".into(),
+                chrono::Weekday::Fri => "fri".into(),
+                chrono::Weekday::Sat => "sat".into(),
+                chrono::Weekday::Sun => "sun".into(),
+            },
+        }
+    }
+
+    /// Human-readable label for the edit-sheet preview and list badge.
+    pub fn title(self) -> String {
+        match self {
+            Recurrence::EveryDays(1) => "every day".into(),
+            Recurrence::EveryDays(n) => format!("every {} days", n),
+            Recurrence::EveryWeeks(1) => "every week".into(),
+            Recurrence::EveryWeeks(n) => format!("every {} weeks", n),
+            Recurrence::EveryMonths(1) => "every month".into(),
+            Recurrence::EveryMonths(n) => format!("every {} months", n),
+            Recurrence::Weekly(wd) => format!("every {:?}", wd),
+        }
+    }
+
+    /// The next due date on/after `from`. Fixed-interval variants add their
+    /// interval; `Weekly(wd)` jumps to the *next* occurrence of `wd` (never
+    /// returning `from` itself, so completing a Monday task on Monday moves it
+    /// to next Monday, not today).
+    pub fn next_after(self, from: DateTime<Utc>) -> DateTime<Utc> {
+        match self {
+            Recurrence::EveryDays(n) => from + chrono::Duration::days(n.max(1) as i64),
+            Recurrence::EveryWeeks(n) => from + chrono::Duration::weeks(n.max(1) as i64),
+            Recurrence::EveryMonths(n) => from
+                .checked_add_months(chrono::Months::new(n.max(1)))
+                .unwrap_or(from + chrono::Duration::days(30 * n.max(1) as i64)),
+            Recurrence::Weekly(target) => {
+                let from_wd = from.weekday().num_days_from_monday() as i64;
+                let target_wd = target.num_days_from_monday() as i64;
+                let mut delta = (target_wd - from_wd).rem_euclid(7);
+                if delta == 0 {
+                    delta = 7;
+                }
+                from + chrono::Duration::days(delta)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Task {
     /// Stable identity that survives the wholesale rewrite in `save_tasks`,
@@ -130,6 +202,11 @@ pub struct Task {
     pub completion_date: Option<DateTime<Utc>>,
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
+    /// If set, completing this task spawns a new occurrence at
+    /// `Recurrence::next_after(due_date.unwrap_or(now))` instead of leaving
+    /// the task done.
+    #[serde(default)]
+    pub recurrence: Option<Recurrence>,
 }
 
 impl Task {
@@ -146,6 +223,7 @@ impl Task {
             creation_date: Utc::now(),
             completion_date: None,
             subtasks: Vec::new(),
+            recurrence: None,
         }
     }
 
@@ -512,17 +590,67 @@ impl App {
     }
 
     pub fn complete_active_task(&mut self) {
-        if let Some(index) = self.active_task_index {
-            if let Some(task) = self.tasks.get_mut(index) {
-                task.completed = !task.completed;
-                if task.completed {
-                    task.completion_date = Some(Utc::now());
-                    self.active_task_index = self.first_active_index();
-                } else {
-                    task.completion_date = None;
-                }
-            }
+        let Some(index) = self.active_task_index else {
+            return;
+        };
+        let Some(task) = self.tasks.get_mut(index) else {
+            return;
+        };
+        // Un-check: just flip the flag off, no spawn.
+        if task.completed {
+            task.completed = false;
+            task.completion_date = None;
+            return;
         }
+        // Complete: mark done, and — if the task is recurring — spawn the next
+        // occurrence *before* moving the cursor so the fresh one is the new
+        // active row.
+        task.completed = true;
+        task.completion_date = Some(Utc::now());
+        let recurrence = task.recurrence;
+        if let Some(rec) = recurrence {
+            let next = self.spawn_next_occurrence(index, rec);
+            self.active_task_index = next.or_else(|| self.first_active_index());
+        } else {
+            self.active_task_index = self.first_active_index();
+        }
+    }
+
+    /// Clone the just-completed task at `from_index` into a fresh incomplete
+    /// occurrence, positioned right after it in the vector. Returns the new
+    /// index for the caller to focus. Subtasks carry over with `done` reset.
+    fn spawn_next_occurrence(&mut self, from_index: usize, rec: Recurrence) -> Option<usize> {
+        let template = self.tasks.get(from_index)?.clone();
+        let base_due = template.due_date.unwrap_or_else(Utc::now);
+        let next_due = rec.next_after(base_due);
+        let now = Utc::now();
+        let subtasks = template
+            .subtasks
+            .iter()
+            .map(|s| SubTask {
+                name: s.name.clone(),
+                done: false,
+                creation_date: now,
+                completion_date: None,
+            })
+            .collect();
+        let fresh = Task {
+            uuid: new_uuid(),
+            name: template.name,
+            notes: template.notes,
+            project: template.project,
+            priority: template.priority,
+            due_date: Some(next_due),
+            due_notified: false,
+            completed: false,
+            creation_date: now,
+            completion_date: None,
+            subtasks,
+            recurrence: Some(rec),
+        };
+        let insert_at = from_index + 1;
+        self.tasks.insert(insert_at, fresh);
+        Some(insert_at)
     }
 
     pub fn delete_active_task(&mut self) {

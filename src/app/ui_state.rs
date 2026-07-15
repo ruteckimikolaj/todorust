@@ -4,7 +4,7 @@ use chrono::{
 };
 use ratatui_textarea::TextArea;
 
-use super::{App, InputMode, Priority, SubTask, Task, View};
+use super::{App, InputMode, Priority, Recurrence, SubTask, Task, View};
 use crate::settings::ColorTheme;
 
 /// Splits `"Buy milk @work"` → `("Buy milk", Some("work"))`.
@@ -67,6 +67,7 @@ pub struct ParsedQuickAdd {
     pub project: Option<String>,
     pub priority: Option<Priority>,
     pub due: Option<DateTime<Utc>>,
+    pub recurrence: Option<Recurrence>,
 }
 
 fn parse_priority_token(body: &str) -> Option<Priority> {
@@ -76,6 +77,43 @@ fn parse_priority_token(body: &str) -> Option<Priority> {
         "3" | "h" | "high" => Some(Priority::High),
         _ => None,
     }
+}
+
+/// Map a shortcut string to a [`Recurrence`]. Recognised forms (case-insensitive):
+/// `daily`, `weekly`, `monthly`; weekday names (`mon`..`sun`, long or short);
+/// and `Nd` / `Nw` / `Nm` for every-N-days / -weeks / -months.
+///
+/// The edit-sheet parser and the `%` token in quick-add both feed through this.
+pub fn parse_recurrence(input: &str) -> Option<Recurrence> {
+    let s = input.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    match s.as_str() {
+        "daily" | "day" => return Some(Recurrence::EveryDays(1)),
+        "weekly" | "week" => return Some(Recurrence::EveryWeeks(1)),
+        "monthly" | "month" => return Some(Recurrence::EveryMonths(1)),
+        _ => {}
+    }
+    if let Some(wd) = weekday_from_str(&s) {
+        return Some(Recurrence::Weekly(wd));
+    }
+    // `Nd` / `Nw` / `Nm` — the trailing char picks the unit.
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let (num_part, unit) = s.split_at(s.len() - 1);
+        if let Ok(n) = num_part.parse::<u32>() {
+            if n >= 1 {
+                return match unit {
+                    "d" => Some(Recurrence::EveryDays(n)),
+                    "w" => Some(Recurrence::EveryWeeks(n)),
+                    "m" => Some(Recurrence::EveryMonths(n)),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
 }
 
 /// Map a shortcut string (case-insensitive) to a concrete due date. Recognised
@@ -177,13 +215,14 @@ pub fn reschedule_to(
         .map(|d| d.with_timezone(&Utc))
 }
 
-/// Whitespace-tokenise `input`, pulling out `@project`, `!priority`, and
-/// `^date` tokens. Anything unrecognised stays in the name; a later token of
-/// the same kind overrides earlier ones so users can retype.
+/// Whitespace-tokenise `input`, pulling out `@project`, `!priority`, `^date`,
+/// and `%recurrence` tokens. Anything unrecognised stays in the name; a later
+/// token of the same kind overrides earlier ones so users can retype.
 pub fn parse_quick_add(input: &str) -> ParsedQuickAdd {
     let mut project: Option<String> = None;
     let mut priority: Option<Priority> = None;
     let mut due: Option<DateTime<Utc>> = None;
+    let mut recurrence: Option<Recurrence> = None;
     let mut kept: Vec<&str> = Vec::new();
 
     for token in input.split_whitespace() {
@@ -210,6 +249,12 @@ pub fn parse_quick_add(input: &str) -> ParsedQuickAdd {
                     continue;
                 }
             }
+            Some('%') if token.len() > 1 => {
+                if let Some(r) = parse_recurrence(&token[1..]) {
+                    recurrence = Some(r);
+                    continue;
+                }
+            }
             _ => {}
         }
         kept.push(token);
@@ -220,6 +265,7 @@ pub fn parse_quick_add(input: &str) -> ParsedQuickAdd {
         project,
         priority,
         due,
+        recurrence,
     }
 }
 
@@ -232,15 +278,17 @@ pub enum SheetField {
     Project,
     Priority,
     Due,
+    Recurrence,
     Notes,
 }
 
 impl SheetField {
-    const ORDER: [SheetField; 5] = [
+    const ORDER: [SheetField; 6] = [
         SheetField::Name,
         SheetField::Project,
         SheetField::Priority,
         SheetField::Due,
+        SheetField::Recurrence,
         SheetField::Notes,
     ];
 
@@ -265,6 +313,8 @@ pub struct EditSheet {
     pub priority: Priority,
     pub due: String,
     pub due_error: bool,
+    pub recurrence: String,
+    pub recurrence_error: bool,
     pub notes: TextArea<'static>,
 }
 
@@ -618,6 +668,12 @@ impl UiState {
                             .map(|d| d.with_timezone(&Local).format(DUE_FORMAT).to_string())
                             .unwrap_or_default(),
                         due_error: false,
+                        recurrence: task
+                            .recurrence
+                            .as_ref()
+                            .map(|r| r.to_shortcut())
+                            .unwrap_or_default(),
+                        recurrence_error: false,
                         notes,
                     });
                     self.input_mode = InputMode::EditingSheet;
@@ -627,7 +683,7 @@ impl UiState {
     }
 
     /// Mutable handle to the buffer of the currently focused text field, if the
-    /// focused field is a plain text field (Name/Project/Due).
+    /// focused field is a plain text field (Name/Project/Due/Recurrence).
     pub fn sheet_text_field_mut(&mut self) -> Option<&mut String> {
         let sheet = self.edit_sheet.as_mut()?;
         match sheet.field {
@@ -636,6 +692,10 @@ impl UiState {
             SheetField::Due => {
                 sheet.due_error = false;
                 Some(&mut sheet.due)
+            }
+            SheetField::Recurrence => {
+                sheet.recurrence_error = false;
+                Some(&mut sheet.recurrence)
             }
             _ => None,
         }
@@ -661,6 +721,21 @@ impl UiState {
                 return;
             }
         };
+        let recurrence = {
+            let raw = sheet.recurrence.trim();
+            if raw.is_empty() {
+                None
+            } else {
+                match parse_recurrence(raw) {
+                    Some(r) => Some(r),
+                    None => {
+                        sheet.recurrence_error = true;
+                        sheet.field = SheetField::Recurrence;
+                        return;
+                    }
+                }
+            }
+        };
         let idx = sheet.task_index;
         let project = {
             let p = sheet.project.trim();
@@ -680,6 +755,7 @@ impl UiState {
                 task.due_date = due;
                 task.due_notified = false;
             }
+            task.recurrence = recurrence;
             task.notes = if notes_text.trim().is_empty() {
                 None
             } else {
@@ -785,6 +861,7 @@ impl UiState {
                     let priority = parsed.priority.unwrap_or(app.settings.default_priority);
                     let mut task = Task::new(parsed.name, parsed.project, priority);
                     task.due_date = parsed.due;
+                    task.recurrence = parsed.recurrence;
                     app.tasks.push(task);
                     if app.active_task_index.is_none() {
                         app.active_task_index = Some(app.tasks.len() - 1);
@@ -1103,5 +1180,186 @@ mod tests {
         assert!(ui.reschedule_error);
         assert!(matches!(ui.input_mode, InputMode::Rescheduling));
         assert!(app.tasks[0].due_date.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 5: recurring tasks
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_recurrence_named_forms() {
+        assert_eq!(parse_recurrence("daily"), Some(Recurrence::EveryDays(1)));
+        assert_eq!(parse_recurrence("weekly"), Some(Recurrence::EveryWeeks(1)));
+        assert_eq!(
+            parse_recurrence("monthly"),
+            Some(Recurrence::EveryMonths(1))
+        );
+    }
+
+    #[test]
+    fn parse_recurrence_shorthand_units() {
+        assert_eq!(parse_recurrence("2d"), Some(Recurrence::EveryDays(2)));
+        assert_eq!(parse_recurrence("3w"), Some(Recurrence::EveryWeeks(3)));
+        assert_eq!(parse_recurrence("6m"), Some(Recurrence::EveryMonths(6)));
+    }
+
+    #[test]
+    fn parse_recurrence_weekday_names() {
+        assert_eq!(
+            parse_recurrence("mon"),
+            Some(Recurrence::Weekly(Weekday::Mon))
+        );
+        assert_eq!(
+            parse_recurrence("Friday"),
+            Some(Recurrence::Weekly(Weekday::Fri))
+        );
+    }
+
+    #[test]
+    fn parse_recurrence_rejects_garbage() {
+        assert_eq!(parse_recurrence(""), None);
+        assert_eq!(parse_recurrence("0d"), None);
+        assert_eq!(parse_recurrence("garbage"), None);
+        assert_eq!(parse_recurrence("2x"), None);
+    }
+
+    #[test]
+    fn quick_add_extracts_recurrence_token() {
+        let p = parse_quick_add("water plants %2d @home");
+        assert_eq!(p.name, "water plants");
+        assert_eq!(p.recurrence, Some(Recurrence::EveryDays(2)));
+        assert_eq!(p.project.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn quick_add_unknown_recurrence_token_stays_in_name() {
+        let p = parse_quick_add("read %bogus");
+        assert_eq!(p.name, "read %bogus");
+        assert_eq!(p.recurrence, None);
+    }
+
+    #[test]
+    fn next_after_every_days_advances_by_interval() {
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 9, 0, 0).unwrap();
+        assert_eq!(
+            Recurrence::EveryDays(3).next_after(base),
+            base + Duration::days(3)
+        );
+    }
+
+    #[test]
+    fn next_after_every_weeks_advances_by_seven_days_per_unit() {
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 9, 0, 0).unwrap();
+        assert_eq!(
+            Recurrence::EveryWeeks(2).next_after(base),
+            base + Duration::days(14)
+        );
+    }
+
+    #[test]
+    fn next_after_every_months_handles_end_of_month() {
+        // Jan 31 + 1 month = Feb 29 in a leap year (chrono clamps).
+        let base = Utc.with_ymd_and_hms(2024, 1, 31, 9, 0, 0).unwrap();
+        let next = Recurrence::EveryMonths(1).next_after(base);
+        assert_eq!(next.date_naive().month(), 2);
+        assert_eq!(next.date_naive().day(), 29);
+    }
+
+    #[test]
+    fn next_after_weekly_jumps_seven_days_when_already_on_target() {
+        // 2024-01-01 was a Monday.
+        let monday = Utc.with_ymd_and_hms(2024, 1, 1, 9, 0, 0).unwrap();
+        let next = Recurrence::Weekly(Weekday::Mon).next_after(monday);
+        assert_eq!(next, monday + Duration::days(7));
+    }
+
+    #[test]
+    fn next_after_weekly_snaps_to_next_target_weekday() {
+        // 2024-01-02 was a Tuesday; next Friday is 2024-01-05.
+        let tuesday = Utc.with_ymd_and_hms(2024, 1, 2, 9, 0, 0).unwrap();
+        let next = Recurrence::Weekly(Weekday::Fri).next_after(tuesday);
+        assert_eq!(next.date_naive().weekday(), Weekday::Fri);
+        assert_eq!(next - tuesday, Duration::days(3));
+    }
+
+    #[test]
+    fn completing_recurring_task_spawns_next_occurrence() {
+        let mut app = App::default();
+        let mut task = Task::new("water".into(), None, Priority::Medium);
+        task.due_date = Some(Utc.with_ymd_and_hms(2024, 1, 1, 9, 0, 0).unwrap());
+        task.recurrence = Some(Recurrence::EveryDays(2));
+        task.subtasks.push(SubTask::new("sub".into()));
+        task.subtasks[0].done = true;
+        app.tasks.push(task);
+        app.active_task_index = Some(0);
+
+        app.complete_active_task();
+
+        assert_eq!(app.tasks.len(), 2, "spawns a fresh occurrence");
+        assert!(app.tasks[0].completed, "original marked done");
+        let spawned = &app.tasks[1];
+        assert!(!spawned.completed);
+        assert_eq!(spawned.name, "water");
+        assert_eq!(spawned.recurrence, Some(Recurrence::EveryDays(2)));
+        assert_eq!(
+            spawned.due_date,
+            Some(Utc.with_ymd_and_hms(2024, 1, 3, 9, 0, 0).unwrap())
+        );
+        assert_eq!(spawned.subtasks.len(), 1);
+        assert!(!spawned.subtasks[0].done, "subtask done flag reset");
+        assert_ne!(spawned.uuid, app.tasks[0].uuid, "fresh uuid");
+        assert_eq!(
+            app.active_task_index,
+            Some(1),
+            "cursor lands on new occurrence"
+        );
+    }
+
+    #[test]
+    fn completing_non_recurring_task_does_not_spawn() {
+        let mut app = App::default();
+        app.tasks
+            .push(Task::new("one-off".into(), None, Priority::Medium));
+        app.active_task_index = Some(0);
+        app.complete_active_task();
+        assert_eq!(app.tasks.len(), 1);
+        assert!(app.tasks[0].completed);
+    }
+
+    #[test]
+    fn edit_sheet_seeds_and_saves_recurrence() {
+        let mut app = App::default();
+        let mut task = Task::new("rec".into(), None, Priority::Medium);
+        task.recurrence = Some(Recurrence::EveryWeeks(2));
+        app.tasks.push(task);
+        app.active_task_index = Some(0);
+
+        let mut ui = UiState::default();
+        ui.open_edit_sheet(&app);
+        let sheet = ui.edit_sheet.as_ref().expect("sheet open");
+        assert_eq!(sheet.recurrence, "2w");
+
+        // Clear it via the edit sheet and confirm the task drops recurrence.
+        ui.edit_sheet.as_mut().unwrap().recurrence.clear();
+        ui.submit_sheet(&mut app);
+        assert_eq!(app.tasks[0].recurrence, None);
+    }
+
+    #[test]
+    fn edit_sheet_bad_recurrence_keeps_sheet_open() {
+        let mut app = App::default();
+        app.tasks
+            .push(Task::new("rec".into(), None, Priority::Medium));
+        app.active_task_index = Some(0);
+
+        let mut ui = UiState::default();
+        ui.open_edit_sheet(&app);
+        ui.edit_sheet.as_mut().unwrap().recurrence = "nonsense".into();
+        ui.submit_sheet(&mut app);
+        assert!(ui.edit_sheet.is_some(), "sheet stays open on bad input");
+        let sheet = ui.edit_sheet.as_ref().unwrap();
+        assert!(sheet.recurrence_error);
+        assert_eq!(sheet.field, SheetField::Recurrence);
+        assert_eq!(app.tasks[0].recurrence, None);
     }
 }

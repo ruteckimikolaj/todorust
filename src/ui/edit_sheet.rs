@@ -1,7 +1,7 @@
 use ratatui::{prelude::*, widgets::*};
 
 use super::centered_rect;
-use crate::app::ui_state::SheetField;
+use crate::app::ui_state::{parse_recurrence, SheetField};
 use crate::app::{Priority, UiState};
 use crate::settings::Theme;
 
@@ -48,6 +48,8 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
             Constraint::Length(1), // priority
             Constraint::Length(1), // due
             Constraint::Length(1), // due error / spacer
+            Constraint::Length(1), // recurrence
+            Constraint::Length(1), // recurrence error / spacer
             Constraint::Length(1), // notes label
             Constraint::Min(3),    // notes body
             Constraint::Length(1), // footer
@@ -150,6 +152,41 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
         );
     }
 
+    // Recurrence — shortcut string with a live preview of the parsed schedule.
+    let recurrence_spans: Vec<Span> = if sheet.recurrence.trim().is_empty() {
+        vec![Span::styled(
+            "(none)",
+            Style::default().fg(theme.help_text_fg),
+        )]
+    } else {
+        let mut spans = vec![Span::styled(sheet.recurrence.clone(), base)];
+        if let Some(r) = parse_recurrence(&sheet.recurrence) {
+            spans.push(Span::styled(
+                format!("  ({})", r.title()),
+                Style::default().fg(theme.help_text_fg),
+            ));
+        }
+        spans
+    };
+    frame.render_widget(
+        Paragraph::new(field_line(
+            "Repeat",
+            recurrence_spans,
+            sheet.field == SheetField::Recurrence,
+            theme,
+        )),
+        rows[5],
+    );
+    if sheet.recurrence_error {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "           invalid — try daily/weekly/monthly, 2d/3w/1m, or mon..sun",
+                Style::default().fg(theme.high_color),
+            ))),
+            rows[6],
+        );
+    }
+
     // Notes label + body (the textarea is rendered live so it stays editable).
     frame.render_widget(
         Paragraph::new(field_line(
@@ -158,7 +195,7 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
             sheet.field == SheetField::Notes,
             theme,
         )),
-        rows[5],
+        rows[7],
     );
     let notes_block = Block::default()
         .borders(Borders::ALL)
@@ -168,8 +205,8 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
         } else {
             Style::default().fg(theme.help_text_fg)
         });
-    let notes_inner = notes_block.inner(rows[6]);
-    frame.render_widget(notes_block, rows[6]);
+    let notes_inner = notes_block.inner(rows[8]);
+    frame.render_widget(notes_block, rows[8]);
     frame.render_widget(&sheet.notes, notes_inner);
 
     // Footer
@@ -178,6 +215,6 @@ pub fn draw_edit_sheet(frame: &mut Frame, ui: &UiState, theme: &Theme) {
             " [Tab] next  [Shift+Tab] prev  [Ctrl+S] save  [Esc] cancel",
             Style::default().fg(theme.help_text_fg),
         ))),
-        rows[7],
+        rows[9],
     );
 }

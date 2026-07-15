@@ -205,6 +205,9 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(badge, Style::default().fg(color)));
             }
+            if task.recurrence.is_some() {
+                spans.push(Span::styled("  ↻", Style::default().fg(theme.accent_color)));
+            }
             list_items.push(ListItem::new(Line::from(spans)));
 
             if is_active {
@@ -311,6 +314,9 @@ pub fn draw_task_list(frame: &mut Frame, app: &App, ui: &UiState, theme: &Theme)
                 "◷ {}",
                 due.with_timezone(&Local).format("%m-%d %H:%M")
             ));
+        }
+        if let Some(r) = parsed.recurrence {
+            parts.push(format!("↻ {}", r.title()));
         }
         if parts.is_empty() {
             base_title
@@ -467,7 +473,7 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App, theme: &Theme) {
 fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
     let rows = [
         ("↑/↓  j/k", "Move selection"),
-        ("a", "Add task (tokens: @proj !prio ^date)"),
+        ("a", "Add task (tokens: @proj !prio ^date %repeat)"),
         ("+", "Add subtask"),
         ("Space / x", "Toggle done (task or selected subtask)"),
         ("Enter / e", "Edit sheet — name/project/priority/due/notes"),
